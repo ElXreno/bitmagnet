@@ -411,6 +411,9 @@ type extDict struct {
 const (
 	maxMetadataSize   = 10 * 1024 * 1024
 	metadataPieceSize = 16 * 1024
+
+	maxExHandshakeMessage = 8 * 1024
+	maxUmMessage          = metadataPieceSize + 1024
 )
 
 func readExHandshake(rw io.ReadWriter) (*rootDict, error) {
@@ -431,7 +434,7 @@ func readExHandshake(rw io.ReadWriter) (*rootDict, error) {
 }
 
 func readExHandshakeDict(r io.Reader) (*rootDict, error) {
-	rExMessage, readErr := readExMessage(r)
+	rExMessage, readErr := readExMessage(r, maxExHandshakeMessage)
 	if readErr != nil {
 		return nil, readErr
 	}
@@ -483,10 +486,10 @@ func uintToBigEndian4(i uint) []byte {
 }
 
 func readAllPieces(r io.Reader, metadataSize uint) ([]byte, error) {
-	var metadataBytes []byte
+	nPieces := (metadataSize + metadataPieceSize - 1) / metadataPieceSize
+	received := make(map[uint][]byte)
 
-	receivedSize := uint(0)
-	for receivedSize < metadataSize {
+	for uint(len(received)) < nPieces {
 		rUmMessage, err := readUmMessage(r)
 		if err != nil {
 			return nil, err
@@ -508,61 +511,43 @@ func readAllPieces(r io.Reader, metadataSize uint) ([]byte, error) {
 		}
 
 		if rExtDict.MsgType == 1 { // data
-			// Get the unread bytes!
-			metadataPiece := rMessageBuf.Bytes()
-			// BEP 9 explicitly states:
-			//   > If the piece is the last piece of the metadata, it may be less than 16kiB. If
-			//   > it is not the last piece of the metadata, it MUST be 16kiB.
-			//
-			// Hence...
-			//   ... if the length of metadataPiece is more than 16kiB, we err.
-			if len(metadataPiece) > 16*1024 {
-				return nil, errors.New("metadataPiece > 16kiB")
-			}
-
-			receivedSize += uint(len(metadataPiece))
-			// ... if the length of @metadataPiece is less than 16kiB AND metadataBytes is NOT
-			// complete then we err.
-			if len(metadataPiece) < 16*1024 && receivedSize != metadataSize {
-				return nil, errors.New("metadataPiece < 16 kiB but incomplete")
-			}
-
-			if receivedSize > metadataSize {
-				return nil, errors.New("receivedSize > metadataSize")
-			}
-
 			piece := rExtDict.Piece
-			if piece < 0 || uint(piece) >= (metadataSize+metadataPieceSize-1)/metadataPieceSize {
+			if piece < 0 || uint(piece) >= nPieces {
 				return nil, errors.New("piece index out of range")
 			}
 
-			start := uint(piece) * metadataPieceSize
+			index := uint(piece)
 
-			end := start + uint(len(metadataPiece))
-			if end > metadataSize {
-				return nil, errors.New("piece exceeds the metadata size")
+			// BEP 9: every piece is 16kiB except the last one
+			wantLen := uint(metadataPieceSize)
+			if index == nPieces-1 {
+				wantLen = metadataSize - index*metadataPieceSize
 			}
 
-			metadataBytes = grownTo(metadataBytes, end)
-			copy(metadataBytes[start:], metadataPiece)
+			metadataPiece := rMessageBuf.Bytes()
+			if uint(len(metadataPiece)) != wantLen {
+				return nil, errors.New("metadata piece has the wrong length for its index")
+			}
+
+			if _, duplicate := received[index]; duplicate {
+				return nil, errors.New("duplicate metadata piece")
+			}
+
+			received[index] = metadataPiece
 		}
 	}
 
-	return grownTo(metadataBytes, metadataSize), nil
-}
-
-// grownTo zero-extends b to at least size bytes, so a meta info takes memory as its pieces arrive.
-func grownTo(b []byte, size uint) []byte {
-	if uint(len(b)) >= size {
-		return b
+	metadataBytes := make([]byte, 0, metadataSize)
+	for index := range nPieces {
+		metadataBytes = append(metadataBytes, received[index]...)
 	}
 
-	return append(b, make([]byte, size-uint(len(b)))...)
+	return metadataBytes, nil
 }
 
-func readExMessage(r io.Reader) ([]byte, error) {
+func readExMessage(r io.Reader, limit uint) ([]byte, error) {
 	for {
-		rMessage, err := readMessage(r)
+		rMessage, err := readMessage(r, limit)
 		if err != nil {
 			return nil, err
 		}
@@ -583,7 +568,7 @@ func readExMessage(r io.Reader) ([]byte, error) {
 // It will IGNORE all non-"ut_metadata extension" messages!
 func readUmMessage(r io.Reader) ([]byte, error) {
 	for {
-		rExMessage, err := readExMessage(r)
+		rExMessage, err := readExMessage(r, maxUmMessage)
 		if err != nil {
 			return nil, err
 		}
@@ -594,27 +579,44 @@ func readUmMessage(r io.Reader) ([]byte, error) {
 	}
 }
 
-// readMessage returns a BitTorrent message, sans the first 4 bytes indicating its length.
-func readMessage(r io.Reader) ([]byte, error) {
-	lengthBytes := make([]byte, 4)
-	if _, err := io.ReadFull(r, lengthBytes); err != nil {
-		return nil, err
+// readMessage returns the next BitTorrent message of at most limit bytes, sans the first 4 bytes
+// indicating its length. Longer messages are streamed to io.Discard, except ut_metadata ones, which
+// are an error.
+func readMessage(r io.Reader, limit uint) ([]byte, error) {
+	for {
+		lengthBytes := make([]byte, 4)
+		if _, err := io.ReadFull(r, lengthBytes); err != nil {
+			return nil, err
+		}
+
+		length := uint(binary.BigEndian.Uint32(lengthBytes))
+
+		if length > maxMetadataSize {
+			return nil, errors.New("message is longer than max allowed metadata size")
+		}
+
+		if length > limit {
+			head := make([]byte, min(length, 2))
+			if _, err := io.ReadFull(r, head); err != nil {
+				return nil, err
+			}
+
+			if len(head) == 2 && head[0] == byte(peer_protocol.Extended) && head[1] == 0x01 {
+				return nil, errors.New("ut_metadata message is longer than allowed")
+			}
+
+			if _, err := io.CopyN(io.Discard, r, int64(length)-int64(len(head))); err != nil {
+				return nil, err
+			}
+
+			continue
+		}
+
+		messageBytes := make([]byte, length)
+		if _, err := io.ReadFull(r, messageBytes); err != nil {
+			return nil, err
+		}
+
+		return messageBytes, nil
 	}
-
-	length := uint(binary.BigEndian.Uint32(lengthBytes))
-
-	// Some malicious/faulty peers say that they are sending a very long
-	// message, and hence causing us to run out of memory.
-	// This is a crude check that does not let it happen (i.e. boundary can probably be
-	// tightened a lot more.)
-	if length > maxMetadataSize {
-		return nil, errors.New("message is longer than max allowed metadata size")
-	}
-
-	messageBytes := make([]byte, length)
-	if _, err := io.ReadFull(r, messageBytes); err != nil {
-		return nil, err
-	}
-
-	return messageBytes, nil
 }

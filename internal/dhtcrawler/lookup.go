@@ -17,7 +17,7 @@ const (
 	lookupMaxQueries   = 24
 	lookupEnoughPeers  = 8
 	lookupMaxPeers     = 16
-	lookupQueryTimeout = 2 * time.Second
+	lookupQueryTimeout = time.Second
 )
 
 type lookupNode struct {

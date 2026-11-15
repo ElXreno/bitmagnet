@@ -120,7 +120,7 @@ func New(params Params) Result {
 						infoHashTriage: concurrency.NewBatchingChannel[nodeHasPeersForHash](
 							10*scalingFactor, 1000, 20*time.Second),
 						getPeers: concurrency.NewBufferedConcurrentChannel[nodeHasPeersForHash](
-							10*scalingFactor, 20*scalingFactor),
+							10*scalingFactor, 100*scalingFactor),
 						scrape: concurrency.NewBufferedConcurrentChannel[nodeHasPeersForHash](
 							10*scalingFactor, 20*scalingFactor),
 						requestMetaInfo: concurrency.NewBufferedConcurrentChannel[infoHashWithPeers](

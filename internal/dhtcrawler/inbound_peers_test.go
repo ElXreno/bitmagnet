@@ -10,6 +10,8 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -683,6 +685,67 @@ func TestInboundLateArrivals(t *testing.T) {
 	}
 }
 
+func TestLateSetSurvivesARestart(t *testing.T) {
+	t.Parallel()
+
+	state := filepath.Join(t.TempDir(), "late.json")
+	config := inboundConfig{maxHashes: 10, hold: time.Minute, maxConns: 4, lateMax: 3, lateTTL: 10 * time.Minute, stateFile: state}
+	first := newInboundTest(t, config, offlineScraper(1))
+	metadata, held := inboundMetadata(t, "restart")
+	weaker, late, fetched := protocol.ID{1}, protocol.ID{2}, protocol.ID{3}
+
+	first.join(late, 5)
+	first.clock.Add(int64(time.Minute))
+	first.inbound.expire()
+	first.join(held, 9)
+	first.inbound.outgoingFailed(sampleRequest(held))
+	first.join(weaker, 4)
+	first.join(fetched, 50)
+	first.inbound.fetchedOutgoing(fetched)
+	first.inbound.leaveAll(0)
+
+	if first.inbound.size() != 0 {
+		t.Fatal("the stopping process must leave every swarm")
+	}
+
+	second := newInboundTest(t, config, offlineScraper(1))
+
+	if second.inbound.lateSize() != 3 || hashCount(t, second.crawler, sourceInboundPeer, "late_loaded") != 3 {
+		t.Fatalf("want the three hashes still wanted loaded as late ones, got %d", second.inbound.lateSize())
+	}
+
+	if _, err := os.Stat(state); !os.IsNotExist(err) {
+		t.Fatal("the state file must be used once")
+	}
+
+	if _, err := (peertest.Peer{InfoHash: held, Metadata: metadata}).Dial(second.address()); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := second.persisted(t); got.infoHash != held || got.origin != sourceSample || got.node.Port() != 6881 {
+		t.Fatalf("persisted %+v", got.nodeHasPeersForHash)
+	}
+
+	second.inbound.leaveAll(0)
+
+	config.lateMax = 1
+	third := newInboundTest(t, config, offlineScraper(1))
+
+	if entry, _ := third.inbound.claim(weaker, false); entry == nil || third.inbound.lateSize() != 1 {
+		t.Fatalf("a smaller late set keeps the hash that was held last, %d late", third.inbound.lateSize())
+	}
+
+	for _, content := range []string{"not json", `[{"hash":"zz"},{"hash":"0102"}]`} {
+		if err := os.WriteFile(state, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		if broken := newInboundTest(t, config, offlineScraper(1)); broken.inbound.lateSize() != 0 {
+			t.Fatalf("a corrupt state file loaded %d hashes", broken.inbound.lateSize())
+		}
+	}
+}
+
 func TestInboundRefusesWhatItCannotUse(t *testing.T) {
 	t.Parallel()
 
@@ -1145,6 +1208,9 @@ func fakeHoldTracker(t *testing.T) (string, chan heldAnnounce, *atomic.Int64) {
 }
 
 func TestInboundSwitchAndTrackerMembership(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "late.json")
+	t.Setenv("BITMAGNET_INBOUND_STATE_FILE", state)
+
 	address, announces, startedDelay := fakeHoldTracker(t)
 
 	t.Setenv("BITMAGNET_TRACKERS", address)
@@ -1275,7 +1341,7 @@ func TestInboundSwitchAndTrackerMembership(t *testing.T) {
 
 	if got := c.inbound.config; got != (inboundConfig{
 		maxHashes: 60, hold: time.Second, maxConns: 3, maxPerIP: 8, lateMax: 50_000, lateTTL: 15 * time.Minute,
-		extraMin: 2, extraMax: 3,
+		extraMin: 2, extraMax: 3, stateFile: state,
 	}) {
 		t.Fatalf("want room for two trackers announcing 30 hashes a second for the hold of one second, got %+v", got)
 	}
@@ -1291,7 +1357,7 @@ func TestInboundSwitchAndTrackerMembership(t *testing.T) {
 
 	peersFed(expiring)
 
-	if !c.inbound.wanted(expiring) {
+	if !c.inbound.held(expiring) {
 		t.Fatal("the hash must be registered by the time its announce is out")
 	}
 
@@ -1522,6 +1588,8 @@ func TestExtraMembershipsUseIdleTokens(t *testing.T) {
 }
 
 func TestExtraMembershipReachesTheOtherTracker(t *testing.T) {
+	t.Setenv("BITMAGNET_INBOUND_STATE_FILE", filepath.Join(t.TempDir(), "late.json"))
+
 	first, firstAnnounces, _ := fakeHoldTracker(t)
 	second, secondAnnounces, _ := fakeHoldTracker(t)
 

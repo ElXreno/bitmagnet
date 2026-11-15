@@ -47,14 +47,14 @@ func (p *inboundPeers) runDHT(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case hash := <-p.dhtQueue:
-			if p.wanted(hash) {
+			if p.held(hash) {
 				p.announceDHT(ctx, hash)
 			}
 		}
 	}
 }
 
-func (p *inboundPeers) wanted(hash protocol.ID) bool {
+func (p *inboundPeers) held(hash protocol.ID) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 

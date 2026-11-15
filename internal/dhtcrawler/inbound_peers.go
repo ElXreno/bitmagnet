@@ -52,12 +52,18 @@ type inboundConfig struct {
 	lateTTL   time.Duration
 	extraMin  uint32
 	extraMax  int
+	stateFile string
 	dht       bool
 }
 
 func inboundConfigFromEnv() (inboundConfig, bool) {
 	if os.Getenv("BITMAGNET_INBOUND_PEERS") != "on" {
 		return inboundConfig{}, false
+	}
+
+	stateFile := os.Getenv("BITMAGNET_INBOUND_STATE_FILE")
+	if stateFile == "" {
+		stateFile = inboundStateFile
 	}
 
 	holdSeconds := envInt("BITMAGNET_INBOUND_HOLD_SECONDS", 300)
@@ -72,6 +78,7 @@ func inboundConfigFromEnv() (inboundConfig, bool) {
 		lateTTL:   time.Duration(envInt("BITMAGNET_INBOUND_LATE_SECONDS", 900)) * time.Second,
 		extraMin:  uint32(envInt("BITMAGNET_INBOUND_EXTRA_MIN_SEEDERS", 2)),
 		extraMax:  envInt("BITMAGNET_INBOUND_EXTRA_TRACKERS", 3),
+		stateFile: stateFile,
 		dht:       os.Getenv("BITMAGNET_INBOUND_DHT") == "on",
 	}, true
 }
@@ -229,6 +236,8 @@ func (c *crawler) openInboundPeers(config inboundConfig, receiver metainforeques
 	if config.dht {
 		p.enableDHT(v4, v6)
 	}
+
+	p.loadState()
 
 	c.inbound = p
 }
@@ -622,11 +631,14 @@ func (p *inboundPeers) leaveAll(timeout time.Duration) {
 	entries := append([]*inboundEntry(nil), p.weakest...)
 	sort.Slice(entries, func(a, b int) bool { return entries[a].seeders > entries[b].seeders })
 
+	saved := p.wanted(entries)
+
 	for _, entry := range entries {
 		p.leave(entry)
 	}
 
 	p.mu.Unlock()
+	p.saveState(saved)
 
 	for _, scraper := range p.trackers {
 		scraper.draining.Store(true)

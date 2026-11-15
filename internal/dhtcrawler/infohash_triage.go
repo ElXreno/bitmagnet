@@ -94,15 +94,6 @@ func (c *crawler) runInfoHashTriage(ctx context.Context) {
 					(t.FilesStatus == model.FilesStatusOverThreshold && t.FilesCount.Uint <= c.saveFilesThreshold) {
 					c.countHash(r.source, stageNeedsMetaInfo, 1)
 
-					if len(r.peers) > 0 {
-						select {
-						case <-ctx.Done():
-							return
-						case c.requestMetaInfo.In() <- infoHashWithPeers{nodeHasPeersForHash: r, peers: r.peers}:
-							continue
-						}
-					}
-
 					select {
 					case <-ctx.Done():
 						return

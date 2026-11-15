@@ -95,6 +95,11 @@ type nodeHasPeersForHash struct {
 }
 
 const (
+	sourceSampleLookup = "sample_infohashes_lookup"
+	stageLookupFound   = "lookup_found"
+	stageLookupEmpty   = "lookup_empty"
+	stageLookupQueries = "lookup_queries"
+	stageLookupRounds  = "lookup_rounds"
 	sourceSample       = "sample_infohashes"
 	stageDiscovered    = "discovered"
 	stageNeedsMetaInfo = "needs_metainfo"

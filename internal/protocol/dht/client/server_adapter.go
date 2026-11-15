@@ -150,7 +150,8 @@ func (a serverAdapter) extractNodes(msg dht.Msg) []NodeInfo {
 
 	for _, n := range nodes6 {
 		addr := n.Addr.ToAddrPort()
-		if dht.IsIPv6(addr.Addr()) && addr.Addr().IsGlobalUnicast() && addr.Port() != 0 {
+		ip := addr.Addr()
+		if dht.IsIPv6(ip) && ip.IsGlobalUnicast() && !ip.IsPrivate() && addr.Port() != 0 {
 			nodes = append(nodes, NodeInfo{ID: n.ID, Addr: addr})
 		}
 	}

@@ -48,6 +48,7 @@ func newFakeServer(ipv6 bool) *fakeServer {
 				nodeInfo(5, "[::1]:6881"),
 				nodeInfo(6, "[fe80::6]:6881"),
 				nodeInfo(7, "[2001:db8::7]:0"),
+				nodeInfo(8, "[fd00::8]:6881"),
 			},
 			Values: []dht.NodeAddr{
 				dht.NewNodeAddrFromAddrPort(netip.MustParseAddrPort("192.0.2.8:6881")),

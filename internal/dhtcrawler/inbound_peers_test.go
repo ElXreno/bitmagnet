@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -999,6 +1000,7 @@ type announcingClient struct {
 	client.Client
 	mu        sync.Mutex
 	nodes     map[netip.AddrPort]protocol.ID
+	values    []netip.AddrPort
 	refusing  netip.AddrPort
 	announces []dhtAnnounce
 }
@@ -1011,7 +1013,7 @@ func (a *announcingClient) GetPeers(
 		return client.GetPeersResult{}, errors.New("no reply")
 	}
 
-	return client.GetPeersResult{ID: id, Token: "token of " + addr.String()}, nil
+	return client.GetPeersResult{ID: id, Values: a.values, Token: "token of " + addr.String()}, nil
 }
 
 func (a *announcingClient) AnnouncePeer(
@@ -1222,6 +1224,9 @@ func TestInboundSwitchAndTrackerMembership(t *testing.T) {
 	t.Setenv("BITMAGNET_INBOUND_LATE_HASHES", "")
 	t.Setenv("BITMAGNET_INBOUND_LATE_SECONDS", "")
 	t.Setenv("BITMAGNET_INBOUND_MAX_CONNS_PER_IP", "")
+	t.Setenv("BITMAGNET_INBOUND_DHT_PPS", "")
+	t.Setenv("BITMAGNET_INBOUND_DHT_HASHES", "")
+	t.Setenv("BITMAGNET_INBOUND_DHT_SECONDS", "")
 	t.Setenv("BITMAGNET_INBOUND_EXTRA_MIN_SEEDERS", "")
 	t.Setenv("BITMAGNET_INBOUND_EXTRA_TRACKERS", "")
 
@@ -1341,7 +1346,7 @@ func TestInboundSwitchAndTrackerMembership(t *testing.T) {
 
 	if got := c.inbound.config; got != (inboundConfig{
 		maxHashes: 60, hold: time.Second, maxConns: 3, maxPerIP: 8, lateMax: 50_000, lateTTL: 15 * time.Minute,
-		extraMin: 2, extraMax: 3, stateFile: state,
+		extraMin: 2, extraMax: 3, stateFile: state, dhtPPS: 150, dhtMax: 300_000, dhtTTL: 45 * time.Minute,
 	}) {
 		t.Fatalf("want room for two trackers announcing 30 hashes a second for the hold of one second, got %+v", got)
 	}
@@ -1684,5 +1689,266 @@ func TestExtraMembershipReachesTheOtherTracker(t *testing.T) {
 
 	if started := counterValue(t, scraper.metrics.sent, map[string]string{"kind": tracker.SentStarted}); started != 2 {
 		t.Fatalf("want two started packets in all, got %v", started)
+	}
+}
+
+func TestDHTHeldSet(t *testing.T) {
+	t.Parallel()
+
+	set := newDHTHeldSet(3, time.Minute)
+	held := func(n byte, since uint32) dhtHeld {
+		return newDHTHeld(nodeHasPeersForHash{
+			infoHash: protocol.ID{n},
+			node:     netip.MustParseAddrPort("192.0.2.9:6881"),
+			source:   sourceSampleLookup6,
+		}, since)
+	}
+
+	for n := byte(1); n <= 3; n++ {
+		if added, evicted := set.add(held(n, 100+uint32(n))); !added || evicted {
+			t.Fatalf("entry %d: added %v, evicted %v", n, added, evicted)
+		}
+	}
+
+	if added, _ := set.add(held(2, 200)); added || set.size() != 3 {
+		t.Fatal("a known hash must not be added twice")
+	}
+
+	if got := set.get(protocol.ID{2}).request(); got.source != sourceSampleLookup6 || got.node.String() != "192.0.2.9:6881" {
+		t.Fatalf("origin of a held hash: %+v", got)
+	}
+
+	if !set.remove(protocol.ID{1}) || set.remove(protocol.ID{1}) || set.get(protocol.ID{1}) != nil {
+		t.Fatal("a removed hash must be gone")
+	}
+
+	if added, evicted := set.add(held(4, 104)); !added || evicted || set.size() != 3 {
+		t.Fatal("the slot of a removed hash leaves without counting as an eviction")
+	}
+
+	if added, evicted := set.add(held(5, 105)); !added || !evicted || set.get(protocol.ID{2}) != nil {
+		t.Fatal("a full set must drop its oldest hash")
+	}
+
+	if set.expire(162) != 0 || set.expire(163) != 1 || set.get(protocol.ID{3}) != nil || set.size() != 2 {
+		t.Fatalf("want exactly the hash past its time expired, %d left", set.size())
+	}
+
+	state := filepath.Join(t.TempDir(), "dht.bin")
+	if err := os.WriteFile(state, set.encode(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded := newDHTHeldSet(3, time.Minute)
+
+	if n := loaded.load(state, 164); n != 1 || loaded.get(protocol.ID{5}) == nil || loaded.get(protocol.ID{5}).since != 105 {
+		t.Fatalf("want the one hash with time left loaded with its age, got %d", n)
+	}
+
+	if _, err := os.Stat(state); !os.IsNotExist(err) {
+		t.Fatal("the state file must be used once")
+	}
+
+	for _, content := range []string{"garbage", dhtHeldMagic + "short"} {
+		_ = os.WriteFile(state, []byte(content), 0o600)
+
+		if n := newDHTHeldSet(3, time.Minute).load(state, 164); n != 0 {
+			t.Fatalf("a corrupt file loaded %d hashes", n)
+		}
+	}
+
+	var off *dhtHeldSet
+
+	if off.size() != 0 || off.get(protocol.ID{1}) != nil || off.remove(protocol.ID{1}) || off.expire(1) != 0 {
+		t.Fatal("a set that is off must be empty")
+	}
+}
+
+func TestDHTJoinForSwarmsWithoutTrackers(t *testing.T) {
+	t.Parallel()
+
+	state := filepath.Join(t.TempDir(), "late.json")
+	config := inboundConfig{
+		maxHashes: 10, hold: time.Minute, maxConns: 8, stateFile: state,
+		dht: true, dhtPPS: 100, dhtMax: 3, dhtTTL: 10 * time.Minute,
+	}
+	cl := &announcingClient{
+		nodes:    make(map[netip.AddrPort]protocol.ID),
+		refusing: netip.MustParseAddrPort("192.0.2.3:6881"),
+	}
+	metadata, hash := inboundMetadata(t, "dht only")
+
+	start := func() inboundTest {
+		c := newFamilyTestCrawler(false, cl)
+
+		for n := 1; n <= 10; n++ {
+			addr := netip.AddrPortFrom(netip.AddrFrom4([4]byte{192, 0, 2, byte(n)}), 6881)
+			cl.nodes[addr] = protocol.ID{hash[0], hash[1], byte(n)}
+			c.v4.nodePool.add(cl.nodes[addr], addr)
+		}
+
+		c.v4.nodePool.rebuild()
+
+		return startInboundTest(t, c, config, offlineScraper(1))
+	}
+
+	i := start()
+	count := func(stage string) float64 { return hashCount(t, i.crawler, sourceInboundPeer, stage) }
+
+	request := sampleRequest(hash)
+	for addr, id := range cl.nodes {
+		request.tokens = append(request.tokens, lookupToken{
+			addr: addr, distance: xorDistance(id, hash), token: "kept for " + addr.String(),
+		})
+	}
+
+	seeded, fetched := protocol.ID{1}, protocol.ID{2}
+	i.scraper.cache.Add(seeded, trackerInfo{seeders: 3})
+	i.fetched.add(fetched)
+	i.join(protocol.ID{3}, 5)
+
+	for _, other := range []protocol.ID{seeded, fetched, {3}} {
+		i.inbound.outgoingFailed(sampleRequest(other))
+	}
+
+	if count("dht_queued") != 0 {
+		t.Fatal("a hash with a tracker membership, with tracker seeders or fetched already must not join through the DHT")
+	}
+
+	i.inbound.outgoingFailed(request)
+	eventually(t, "the join with kept tokens", func() bool { return count("dht_joined") == 1 })
+
+	var announces []dhtAnnounce
+
+	for _, announce := range cl.seen() {
+		if announce.hash == hash {
+			announces = append(announces, announce)
+		}
+	}
+
+	if len(announces) != inboundDHTNodes || count("dht_tokens_reused") != 1 || count("dht_tokens_looked_up") != 0 {
+		t.Fatalf("want the kept tokens used for the %d closest nodes, got %d announces", inboundDHTNodes, len(announces))
+	}
+
+	closest := append([]lookupToken(nil), request.tokens...)
+	sort.Slice(closest, func(a, b int) bool {
+		return bytes.Compare(closest[a].distance[:], closest[b].distance[:]) < 0
+	})
+
+	wanted := make(map[netip.AddrPort]bool)
+	for _, token := range closest[:inboundDHTNodes] {
+		wanted[token.addr] = true
+	}
+
+	for _, announce := range announces {
+		if announce.token != "kept for "+announce.addr.String() || !wanted[announce.addr] ||
+			announce.port != listenerPort(i.inbound.listeners[0]) {
+			t.Fatalf("announce %+v", announce)
+		}
+	}
+
+	if _, err := (peertest.Peer{InfoHash: hash, Metadata: metadata, Encrypted: true}).Dial(i.address()); err == nil {
+		t.Fatal("a DHT-held hash must not be an MSE key")
+	}
+
+	i.clock.Add(int64(100 * time.Second))
+
+	if _, err := (peertest.Peer{InfoHash: hash, Metadata: metadata}).Dial(i.address()); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := i.persisted(t); got.infoHash != hash || got.source != sourceInboundPeer || got.origin != sourceSample {
+		t.Fatalf("persisted %+v", got.nodeHasPeersForHash)
+	}
+
+	for stage, want := range map[string]float64{
+		"dht_queued":                          1,
+		stageInboundDHTConn:                   1,
+		stageMetaInfoOK:                       1,
+		stageMetaInfoOK + "_dht":              1,
+		stageMetaInfoOK + "_dht_wait_seconds": 100,
+		stageMetaInfoOK + "_wait_seconds":     0,
+		stageInboundUnknownHash:               1,
+	} {
+		if got := count(stage); got != want {
+			t.Errorf("stage %s: want %v, got %v", stage, want, got)
+		}
+	}
+
+	if i.inbound.dhtSize() != 0 || !i.fetched.test(hash) {
+		t.Fatal("a fetched hash must leave the DHT-held set")
+	}
+
+	looked, refused := protocol.ID{hash[0], hash[1], 0x40}, protocol.ID{hash[0], hash[1], 0x41}
+	onlyRefusing := sampleRequest(refused)
+	onlyRefusing.tokens = []lookupToken{{addr: cl.refusing, token: "x"}}
+
+	i.inbound.outgoingFailed(sampleRequest(looked))
+	i.inbound.outgoingFailed(onlyRefusing)
+	eventually(t, "the join after a lookup and the refused one", func() bool {
+		return count("dht_joined") == 2 && count("dht_join_failed") == 1 && count("dht_tokens_looked_up") == 1
+	})
+
+	for n := byte(0x50); n < 0x53; n++ {
+		i.inbound.outgoingFailed(sampleRequest(protocol.ID{hash[0], hash[1], n}))
+	}
+
+	eventually(t, "the bound", func() bool { return count("dht_joined") == 5 && count("dht_evicted") == 1 })
+
+	i.inbound.fetchedOutgoing(protocol.ID{hash[0], hash[1], 0x50})
+	i.inbound.release(protocol.ID{hash[0], hash[1], 0x51}, "released_closed_swarm")
+
+	if count("dht_"+stageInboundFetchedOut) != 1 || count("dht_released_closed_swarm") != 1 || i.inbound.dhtSize() != 1 {
+		t.Fatalf("a hash fetched outside or closed must leave the set, %d left", i.inbound.dhtSize())
+	}
+
+	i.inbound.leaveAll(0)
+
+	i = start()
+
+	if count("dht_loaded") != 1 || i.inbound.dhtSize() != 1 {
+		t.Fatalf("want the DHT-held hash back after a restart, got %d", i.inbound.dhtSize())
+	}
+
+	i.clock.Add(int64(11 * time.Minute))
+	i.inbound.expire()
+
+	if count("dht_expired") != 1 || i.inbound.dhtSize() != 0 {
+		t.Fatal("a DHT-held hash outlived its time")
+	}
+}
+
+func TestTokensTravelWithTheRequest(t *testing.T) {
+	t.Parallel()
+
+	node := netip.MustParseAddrPort("192.0.2.1:6881")
+	cl := &announcingClient{
+		nodes:  map[netip.AddrPort]protocol.ID{node: {0x81}},
+		values: []netip.AddrPort{peer4},
+	}
+	req := nodeHasPeersForHash{infoHash: protocol.ID{0x80}, node: node, source: sourceSample}
+
+	off := newFamilyTestCrawler(false, cl)
+
+	found, _, err := off.requestPeersForHash(context.Background(), req)
+	if err != nil || len(found.tokens) != 0 {
+		t.Fatalf("without the DHT join no token is kept: %v, %d tokens", err, len(found.tokens))
+	}
+
+	config := inboundConfig{maxHashes: 10, hold: time.Minute, maxConns: 4, dht: true, dhtPPS: 10, dhtMax: 10, dhtTTL: time.Minute}
+	on := startInboundTest(t, newFamilyTestCrawler(false, cl), config, offlineScraper(1))
+
+	found, _, err = on.requestPeersForHash(context.Background(), req)
+	if err != nil || len(found.tokens) != 1 || found.tokens[0].addr != node ||
+		found.tokens[0].token != "token of "+node.String() || found.tokens[0].distance != (protocol.ID{0x01}) {
+		t.Fatalf("want the token of the node that had the peers, got %+v (%v)", found.tokens, err)
+	}
+
+	var tokens []lookupToken
+
+	on.lookupPeersWithTokens(context.Background(), sourceSampleLookup, req.infoHash, []client.NodeInfo{{ID: protocol.ID{0x81}, Addr: node}}, &tokens)
+
+	if len(tokens) != 1 || tokens[0].addr != node {
+		t.Fatalf("want the tokens of the lookup, got %+v", tokens)
 	}
 }

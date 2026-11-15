@@ -58,7 +58,7 @@ func (c *crawler) runGetPeers(ctx context.Context) {
 		c.countHash(req.source, stagePeersFound, 1)
 		c.countClass(req, stagePeersFound, 1)
 		c.countHash(req.source, stagePeersSum, len(pfh.peers))
-		c.forwardPeers(ctx, req, pfh.peers)
+		c.forwardPeers(ctx, pfh.nodeHasPeersForHash, pfh.peers)
 	})
 }
 
@@ -69,7 +69,12 @@ type lookupRequest struct {
 
 func (c *crawler) runLookups(ctx context.Context, ch concurrency.BufferedConcurrentChannel[lookupRequest]) {
 	_ = ch.Run(ctx, func(req lookupRequest) {
-		found := c.lookupPeers(ctx, req.source, req.infoHash, req.seeds)
+		var tokens *[]lookupToken
+		if c.inbound.keepsTokens() {
+			tokens = &req.tokens
+		}
+
+		found := c.lookupPeersWithTokens(ctx, req.source, req.infoHash, req.seeds, tokens)
 		if len(found) == 0 {
 			c.countHash(req.source, stageLookupEmpty, 1)
 		} else {
@@ -154,6 +159,10 @@ func (c *crawler) requestPeersForHash(
 
 	if len(res.Values) < 1 {
 		return infoHashWithPeers{}, res.Nodes, errNoPeers
+	}
+
+	if res.Token != "" && c.inbound.keepsTokens() {
+		req.tokens = []lookupToken{{addr: req.node, distance: xorDistance(res.ID, req.infoHash), token: res.Token}}
 	}
 
 	return infoHashWithPeers{

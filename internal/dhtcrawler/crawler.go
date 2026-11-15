@@ -141,6 +141,7 @@ type nodeHasPeersForHash struct {
 	visit    string
 	class    string
 	origin   string
+	tokens   []lookupToken
 }
 
 const (

@@ -68,18 +68,37 @@ func (c *crawler) lookupPeers(
 	hash protocol.ID,
 	seeds []client.NodeInfo,
 ) []netip.AddrPort {
+	return c.lookupPeersWithTokens(ctx, source, hash, seeds, nil)
+}
+
+func (c *crawler) lookupPeersWithTokens(
+	ctx context.Context,
+	source string,
+	hash protocol.ID,
+	seeds []client.NodeInfo,
+	tokens *[]lookupToken,
+) []netip.AddrPort {
 	if c.v6 == nil || !lookupIPv6 {
-		return c.lookupFamilyPeers(ctx, c.v4, source, hash, seeds)
+		return c.lookupFamily(ctx, c.v4, source, hash, seeds, tokens)
+	}
+
+	var tokens6 *[]lookupToken
+	if tokens != nil {
+		tokens6 = new([]lookupToken)
 	}
 
 	found6 := make(chan []netip.AddrPort, 1)
 
 	go func() {
-		found6 <- c.lookupFamilyPeers(ctx, c.v6, source, hash, seeds)
+		found6 <- c.lookupFamily(ctx, c.v6, source, hash, seeds, tokens6)
 	}()
 
-	peers := c.lookupFamilyPeers(ctx, c.v4, source, hash, seeds)
+	peers := c.lookupFamily(ctx, c.v4, source, hash, seeds, tokens)
 	peers6 := <-found6
+
+	if tokens != nil {
+		*tokens = append(*tokens, *tokens6...)
+	}
 
 	if len(peers6) > 0 {
 		c.countHash(source, stageLookupFound+"6", 1)

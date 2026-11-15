@@ -19,6 +19,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
+	"golang.org/x/time/rate"
 )
 
 const (
@@ -33,6 +34,7 @@ const (
 	stageInboundUnknownHash    = "unknown_hash"
 	stageInboundActiveConn     = "active_conn"
 	stageInboundLateConn       = "late_conn"
+	stageInboundDHTConn        = "dht_conn"
 	stageInboundHandshake      = "handshake_failed"
 	stageInboundNoMetaInfo     = "peer_no_metainfo"
 	stageInboundFetchFailed    = "fetch_failed"
@@ -54,6 +56,9 @@ type inboundConfig struct {
 	extraMax  int
 	stateFile string
 	dht       bool
+	dhtPPS    int
+	dhtMax    int
+	dhtTTL    time.Duration
 }
 
 func inboundConfigFromEnv() (inboundConfig, bool) {
@@ -80,6 +85,9 @@ func inboundConfigFromEnv() (inboundConfig, bool) {
 		extraMax:  envInt("BITMAGNET_INBOUND_EXTRA_TRACKERS", 3),
 		stateFile: stateFile,
 		dht:       os.Getenv("BITMAGNET_INBOUND_DHT") == "on",
+		dhtPPS:    envInt("BITMAGNET_INBOUND_DHT_PPS", 150),
+		dhtMax:    envInt("BITMAGNET_INBOUND_DHT_HASHES", 300_000),
+		dhtTTL:    time.Duration(envInt("BITMAGNET_INBOUND_DHT_SECONDS", 2700)) * time.Second,
 	}, true
 }
 
@@ -98,6 +106,7 @@ type inboundEntry struct {
 	failed    bool
 	extras    bool
 	late      bool
+	dht       bool
 	done      bool
 }
 
@@ -141,6 +150,10 @@ type inboundPeers struct {
 	trackers   []*trackerScraper
 	dhtQueue   chan protocol.ID
 	dhtTargets []inboundDHTTarget
+	dhtSet     *dhtHeldSet
+	dhtJoins   chan nodeHasPeersForHash
+	dhtLimiter *rate.Limiter
+	dhtLookups chan struct{}
 	slots      chan struct{}
 	ipMu       sync.Mutex
 	perIP      map[netip.Addr]int
@@ -239,6 +252,10 @@ func (c *crawler) openInboundPeers(config inboundConfig, receiver metainforeques
 
 	p.loadState()
 
+	if p.dhtSet != nil && config.stateFile != "" {
+		c.countHash(sourceInboundPeer, "dht_loaded", p.dhtSet.load(p.dhtFile(), uint32(p.now().Unix())))
+	}
+
 	c.inbound = p
 }
 
@@ -255,6 +272,10 @@ func (p *inboundPeers) run(ctx context.Context) {
 		for range inboundDHTWorkers {
 			go p.runDHT(ctx)
 		}
+	}
+
+	if p.dhtJoins != nil {
+		go p.runDHTJoins(ctx)
 	}
 
 	ticker := time.NewTicker(time.Second)
@@ -477,8 +498,14 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 	}
 
 	c.countHash(sourceInboundPeer, stageMetaInfoOK, 1)
-	c.countHash(sourceInboundPeer, stageMetaInfoOK+trackerSource(entry.seeders), 1)
-	c.countHash(sourceInboundPeer, stageMetaInfoOK+"_wait_seconds", int(p.now().Sub(entry.since).Seconds()))
+
+	if waited := int(p.now().Sub(entry.since).Seconds()); entry.dht {
+		c.countHash(sourceInboundPeer, stageMetaInfoOK+"_dht", 1)
+		c.countHash(sourceInboundPeer, stageMetaInfoOK+"_dht_wait_seconds", waited)
+	} else {
+		c.countHash(sourceInboundPeer, stageMetaInfoOK+trackerSource(entry.seeders), 1)
+		c.countHash(sourceInboundPeer, stageMetaInfoOK+"_wait_seconds", waited)
+	}
 
 	if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok && dht.IsIPv6(tcpAddr.AddrPort().Addr()) {
 		c.countHash(sourceInboundPeer, stageMetaInfoOK+"6", 1)
@@ -616,6 +643,10 @@ func (p *inboundPeers) forget(hash protocol.ID) string {
 		return "late"
 	}
 
+	if p.dhtSet.remove(hash) {
+		return "dht"
+	}
+
 	return ""
 }
 
@@ -637,8 +668,14 @@ func (p *inboundPeers) leaveAll(timeout time.Duration) {
 		p.leave(entry)
 	}
 
+	var dhtHeld []byte
+	if p.dhtSet != nil {
+		dhtHeld = p.dhtSet.encode()
+	}
+
 	p.mu.Unlock()
 	p.saveState(saved)
+	p.saveDHT(dhtHeld)
 
 	for _, scraper := range p.trackers {
 		scraper.draining.Store(true)
@@ -706,10 +743,13 @@ func (p *inboundPeers) expire() {
 		lateExpired++
 	}
 
+	dhtExpired := p.dhtSet.expire(uint32(now.Unix()))
+
 	p.mu.Unlock()
 
 	p.c.countHash(sourceInboundPeer, stageInboundExpired, expired)
 	p.c.countHash(sourceInboundPeer, "late_expired", lateExpired)
+	p.c.countHash(sourceInboundPeer, "dht_expired", dhtExpired)
 }
 
 func (p *inboundPeers) fetchedOutgoing(hash protocol.ID) {
@@ -728,8 +768,8 @@ func (p *inboundPeers) release(hash protocol.ID, stage string) {
 	switch kind {
 	case "active":
 		p.c.countHash(sourceInboundPeer, stage, 1)
-	case "late":
-		p.c.countHash(sourceInboundPeer, "late_"+stage, 1)
+	case "late", "dht":
+		p.c.countHash(sourceInboundPeer, kind+"_"+stage, 1)
 	}
 }
 
@@ -758,13 +798,20 @@ func (p *inboundPeers) outgoingFailed(req nodeHasPeersForHash) {
 
 		if entry.req.source == "" || (!sampled(entry.req.source) && sampled(req.source)) {
 			entry.req = req
+			entry.req.tokens = nil
 		}
 	}
+
+	joins := !ok && p.dhtJoins != nil && p.dhtSet.get(req.infoHash) == nil
 
 	p.mu.Unlock()
 
 	if first {
 		p.c.countHash(sourceInboundPeer, "outgoing_failed", 1)
+	}
+
+	if joins && !p.c.seeded(req.infoHash) && !p.c.fetched.test(req.infoHash) {
+		p.queueJoin(req)
 	}
 }
 
@@ -832,6 +879,24 @@ func (p *inboundPeers) claim(hash protocol.ID, encrypted bool) (*inboundEntry, s
 		}
 	}
 
+	if held := p.dhtSet.get(hash); !ok && !encrypted && held != nil {
+		switch {
+		case p.c.fetched.test(hash):
+			p.dhtSet.remove(hash)
+		case held.active >= inboundConnsPerHash:
+			return nil, stageInboundBusy
+		default:
+			held.active++
+
+			return &inboundEntry{
+				hash:  hash,
+				req:   held.request(),
+				since: time.Unix(int64(held.since), 0),
+				dht:   true,
+			}, stageInboundDHTConn
+		}
+	}
+
 	switch {
 	case !ok:
 		return nil, stageInboundUnknownHash
@@ -846,15 +911,20 @@ func (p *inboundPeers) claim(hash protocol.ID, encrypted bool) (*inboundEntry, s
 
 func (p *inboundPeers) unclaim(entry *inboundEntry) {
 	p.mu.Lock()
-	entry.active--
-	p.mu.Unlock()
+	defer p.mu.Unlock()
+
+	if !entry.dht {
+		entry.active--
+	} else if held := p.dhtSet.get(entry.hash); held != nil && held.active > 0 {
+		held.active--
+	}
 }
 
 func (p *inboundPeers) take(entry *inboundEntry) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if entry.done {
+	if entry.done || (entry.dht && p.dhtSet.get(entry.hash) == nil) {
 		return false
 	}
 
@@ -876,4 +946,11 @@ func (p *inboundPeers) lateSize() int {
 	defer p.mu.Unlock()
 
 	return len(p.late)
+}
+
+func (p *inboundPeers) dhtSize() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.dhtSet.size()
 }

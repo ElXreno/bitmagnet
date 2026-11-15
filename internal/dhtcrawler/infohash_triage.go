@@ -106,6 +106,7 @@ func (c *crawler) runInfoHashTriage(
 					(t.FilesStatus != model.FilesStatusSingle && !t.FilesCount.Valid) ||
 					(t.FilesStatus == model.FilesStatusOverThreshold && t.FilesCount.Uint <= c.saveFilesThreshold) {
 					c.countHash(r.source, stageNeedsMetaInfo, 1)
+					c.trackers.submit(r.infoHash)
 
 					sendOne := time.Now()
 

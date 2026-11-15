@@ -40,6 +40,7 @@ func (c *crawler) runGetPeers(ctx context.Context) {
 			case c.lookups.In() <- lookupRequest{nodeHasPeersForHash: req, seeds: nodes}:
 			default:
 				c.countHash(req.source, stageLookupDropped, 1)
+				c.trackerOutcome(req.infoHash, stageLookupDropped)
 			}
 
 			return
@@ -74,6 +75,8 @@ func (c *crawler) runLookups(ctx context.Context, ch concurrency.BufferedConcurr
 		}
 
 		if len(peers) == 0 {
+			c.trackerOutcome(req.infoHash, stageLookupEmpty)
+
 			return
 		}
 

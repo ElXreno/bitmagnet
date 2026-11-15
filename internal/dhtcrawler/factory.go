@@ -49,6 +49,9 @@ type Result struct {
 	StageGauge     prometheus.Collector `group:"prometheus_collectors"`
 	ProbeTotal     prometheus.Collector `group:"prometheus_collectors"`
 	LookupQueries  prometheus.Collector `group:"prometheus_collectors"`
+	TrackerPackets prometheus.Collector `group:"prometheus_collectors"`
+	TrackerHashes  prometheus.Collector `group:"prometheus_collectors"`
+	TrackerOutcome prometheus.Collector `group:"prometheus_collectors"`
 }
 
 func New(params Params) Result {
@@ -94,6 +97,8 @@ func New(params Params) Result {
 		Help:      "A counter of meta info requests to peers by discovery source and result.",
 	}, []string{"source", "result"})
 
+	trackerMetrics := newTrackerMetrics()
+
 	return Result{
 		Worker: worker.NewWorker(
 			"dht_crawler",
@@ -113,6 +118,11 @@ func New(params Params) Result {
 					if err != nil {
 						return err
 					}
+					trackers, err := newTrackerScraper(trackerMetrics)
+					if err != nil {
+						return err
+					}
+
 					c = crawler{
 						kTable:                       params.KTable,
 						client:                       cl,
@@ -134,6 +144,7 @@ func New(params Params) Result {
 						stageGauge:    stageGauge,
 						probeTotal:    probeTotal,
 						lookupQueries: lookupQueries,
+						trackers:      trackers,
 						nodePool:      newNodePool(),
 						pingCache: newPingCache(
 							time.Duration(envInt("BITMAGNET_PING_CACHE_SECONDS", 300)) * time.Second),
@@ -210,6 +221,9 @@ func New(params Params) Result {
 		StageGauge:       stageGauge,
 		ProbeTotal:       probeTotal,
 		LookupQueries:    lookupQueries,
+		TrackerPackets:   trackerMetrics.packets,
+		TrackerHashes:    trackerMetrics.hashes,
+		TrackerOutcome:   trackerMetrics.outcome,
 		DhtCrawlerActive: active,
 	}
 }

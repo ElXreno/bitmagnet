@@ -23,16 +23,20 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 		if reqErr != nil {
 			if errors.Is(reqErr, errBanned) {
 				c.countHash(req.source, stageBanned, 1)
+				c.trackerOutcome(req.infoHash, stageBanned)
 			} else if errors.Is(reqErr, errNoCandidates) {
 				c.countHash(req.source, "no_candidates", 1)
+				c.trackerOutcome(req.infoHash, "no_candidates")
 			} else {
 				c.countHash(req.source, stageMetaInfoFail, 1)
+				c.trackerOutcome(req.infoHash, stageMetaInfoFail)
 			}
 
 			return
 		}
 
 		c.countHash(req.source, stageMetaInfoOK, 1)
+		c.trackerOutcome(req.infoHash, stageMetaInfoOK)
 		select {
 		case <-ctx.Done():
 		case c.persistTorrents.In() <- infoHashWithMetaInfo{

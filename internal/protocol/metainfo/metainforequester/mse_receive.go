@@ -3,7 +3,6 @@ package metainforequester
 import (
 	"bufio"
 	"bytes"
-	"crypto/rand"
 	"crypto/rc4"  //nolint:gosec
 	"crypto/sha1" //nolint:gosec
 	"encoding/binary"
@@ -110,19 +109,21 @@ func mseReceive(rw io.ReadWriter, lookup MSELookup) (io.ReadWriter, protocol.ID,
 		return nil, protocol.ID{}, fmt.Errorf("%w: public key: %w", errMSE, err)
 	}
 
-	var seed [20]byte
-	if _, err := rand.Read(seed[:]); err != nil {
+	peer := new(big.Int).SetBytes(theirs[:])
+	if peer.Cmp(big.NewInt(1)) <= 0 || peer.Cmp(new(big.Int).Sub(msePrime, big.NewInt(1))) >= 0 {
+		return nil, protocol.ID{}, fmt.Errorf("%w: degenerate public key", errMSE)
+	}
+
+	keys, err := sharedMSEKeys.get()
+	if err != nil {
 		return nil, protocol.ID{}, fmt.Errorf("%w: %w", errMSE, err)
 	}
 
-	private := new(big.Int).SetBytes(seed[:])
+	var secret [mseKeyLen]byte
 
-	var ours, secret [mseKeyLen]byte
+	new(big.Int).Exp(peer, keys.private, msePrime).FillBytes(secret[:])
 
-	new(big.Int).Exp(mseGenerator, private, msePrime).FillBytes(ours[:])
-	new(big.Int).Exp(new(big.Int).SetBytes(theirs[:]), private, msePrime).FillBytes(secret[:])
-
-	if _, err := rw.Write(ours[:]); err != nil {
+	if _, err := rw.Write(keys.public[:]); err != nil {
 		return nil, protocol.ID{}, fmt.Errorf("%w: %w", errMSE, err)
 	}
 

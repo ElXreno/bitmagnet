@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"math/big"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -133,6 +135,138 @@ func TestMSEReceiveRefusals(t *testing.T) {
 
 		if _, _, err := mseReceive(rw, mseIndexOf(protocol.ID{1})); !errors.Is(err, errMSE) {
 			t.Errorf("%s: got %v", name, err)
+		}
+	}
+}
+
+func BenchmarkMSEReceive(b *testing.B) {
+	var theirs [mseKeyLen]byte
+
+	new(big.Int).Exp(mseGenerator, big.NewInt(0x1234567890abcdef), msePrime).FillBytes(theirs[:])
+
+	lookup := mseIndexOf(protocol.ID{1})
+
+	b.ResetTimer()
+
+	for range b.N {
+		rw := struct {
+			io.Reader
+			io.Writer
+		}{bytes.NewReader(theirs[:]), io.Discard}
+
+		_, _, _ = mseReceive(rw, lookup)
+	}
+}
+
+func TestMSEReceiveRefusesDegenerateKeys(t *testing.T) {
+	t.Parallel()
+
+	one := big.NewInt(1)
+	primeMinusOne := new(big.Int).Sub(msePrime, one)
+
+	for name, key := range map[string]*big.Int{
+		"zero":         big.NewInt(0),
+		"one":          one,
+		"p minus one":  primeMinusOne,
+		"p":            msePrime,
+		"above p":      new(big.Int).Add(msePrime, big.NewInt(5)),
+		"all bits set": new(big.Int).Sub(new(big.Int).Lsh(one, 8*mseKeyLen), one),
+	} {
+		var stream [mseKeyLen]byte
+
+		key.FillBytes(stream[:])
+
+		var written bytes.Buffer
+
+		rw := struct {
+			io.Reader
+			io.Writer
+		}{bytes.NewReader(stream[:]), &written}
+
+		if _, _, err := mseReceive(rw, mseIndexOf(protocol.ID{1})); !errors.Is(err, errMSE) {
+			t.Errorf("%s: got %v", name, err)
+		}
+
+		if written.Len() != 0 {
+			t.Errorf("%s: answered a degenerate key with %d bytes", name, written.Len())
+		}
+	}
+
+	var stream [mseKeyLen]byte
+
+	new(big.Int).Sub(msePrime, big.NewInt(2)).FillBytes(stream[:])
+
+	var written bytes.Buffer
+
+	rw := struct {
+		io.Reader
+		io.Writer
+	}{bytes.NewReader(stream[:]), &written}
+
+	_, _, _ = mseReceive(rw, mseIndexOf(protocol.ID{1}))
+
+	if written.Len() != mseKeyLen {
+		t.Errorf("p minus two: answered with %d bytes", written.Len())
+	}
+}
+
+func TestMSEKeysRotate(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1000, 0)
+	keys := &mseKeys{now: func() time.Time { return now }, lifetime: time.Minute}
+
+	first, err := keys.get()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now = now.Add(59 * time.Second)
+
+	same, _ := keys.get()
+	if same != first {
+		t.Fatal("the key pair changed before its lifetime ended")
+	}
+
+	now = now.Add(time.Second)
+
+	next, _ := keys.get()
+	if next == first || next.private.Cmp(first.private) == 0 || next.public == first.public {
+		t.Fatal("the key pair was not replaced after its lifetime")
+	}
+
+	want := new(big.Int).Exp(mseGenerator, next.private, msePrime)
+	if new(big.Int).SetBytes(next.public[:]).Cmp(want) != 0 {
+		t.Fatal("public key does not match the private one")
+	}
+}
+
+func TestMSEKeysConcurrent(t *testing.T) {
+	t.Parallel()
+
+	keys := &mseKeys{now: time.Now, lifetime: time.Minute}
+	pairs := make(chan *mseKeyPair, 32)
+
+	var wg sync.WaitGroup
+
+	for range cap(pairs) {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			pair, _ := keys.get()
+			pairs <- pair
+		}()
+	}
+
+	wg.Wait()
+	close(pairs)
+
+	first := <-pairs
+	for pair := range pairs {
+		if pair != first {
+			t.Fatal("concurrent callers got different key pairs")
 		}
 	}
 }

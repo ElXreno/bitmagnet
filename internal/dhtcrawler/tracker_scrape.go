@@ -67,13 +67,23 @@ func newTrackerMetrics() trackerMetrics {
 type trackerInfo struct {
 	seeders   uint32
 	leechers  uint32
+	seededBy  uint32
 	announced bool
 }
 
-type announceJob struct {
-	hash    protocol.ID
-	tracker int
-	seeders uint32
+const announcePriorities = 4
+
+func announcePriority(seeders uint32) int {
+	switch {
+	case seeders >= 20:
+		return 0
+	case seeders >= 5:
+		return 1
+	case seeders >= 2:
+		return 2
+	default:
+		return 3
+	}
 }
 
 // trackerScraper asks public UDP trackers about the swarms of info hashes in batches (BEP 15 scrape).
@@ -82,7 +92,8 @@ type trackerScraper struct {
 	client           *tracker.Client
 	limiters         []*rate.Limiter
 	in               chan protocol.ID
-	announces        chan announceJob
+	announces        [announcePriorities]chan protocol.ID
+	announceEnabled  bool
 	announceLimiters []*rate.Limiter
 	announceParams   tracker.AnnounceParams
 	onPeers          func(ctx context.Context, hash protocol.ID, seeders uint32, peers []netip.AddrPort)
@@ -125,7 +136,12 @@ func newTrackerScraper(metrics trackerMetrics) (*trackerScraper, error) {
 	if os.Getenv("BITMAGNET_TRACKER_ANNOUNCE") != "off" {
 		announcesPerSecond := envInt("BITMAGNET_TRACKER_ANNOUNCE_PPS", 20)
 
-		scraper.announces = make(chan announceJob, trackerAnnounceQueue)
+		scraper.announceEnabled = true
+
+		for i := range scraper.announces {
+			scraper.announces[i] = make(chan protocol.ID, trackerAnnounceQueue)
+		}
+
 		scraper.announceLimiters = make([]*rate.Limiter, len(hosts))
 
 		for i := range hosts {
@@ -179,7 +195,7 @@ func (s *trackerScraper) run(ctx context.Context) {
 		return
 	}
 
-	if s.announces != nil {
+	if s.announceEnabled {
 		for range trackerAnnounceWorkers {
 			go s.runAnnounces(ctx)
 		}
@@ -260,12 +276,20 @@ func (s *trackerScraper) scrape(ctx context.Context, index int, host string, has
 		info.seeders = max(info.seeders, r.Seeders)
 		info.leechers = max(info.leechers, r.Leechers)
 
-		if s.announces != nil && r.Seeders > 0 && !info.announced {
+		if r.Seeders > 0 {
+			info.seededBy |= 1 << index
+		}
+
+		if s.announceEnabled && r.Seeders > 0 && !info.announced {
+			priority := announcePriority(r.Seeders)
+
 			select {
-			case s.announces <- announceJob{hash: hashes[i], tracker: index, seeders: r.Seeders}:
+			case s.announces[priority] <- hashes[i]:
 				info.announced = true
+
+				s.metrics.hashes.With(prometheus.Labels{"tracker": "queued", "swarm": trackerSource(r.Seeders)}).Inc()
 			default:
-				s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_queue_full"}).Inc()
+				s.metrics.hashes.With(prometheus.Labels{"tracker": "queue_full", "swarm": trackerSource(r.Seeders)}).Inc()
 			}
 		}
 
@@ -295,43 +319,92 @@ func (c *crawler) unseeded(hash protocol.ID) bool {
 	return swarm == "leechers" || swarm == "unknown"
 }
 
+func (s *trackerScraper) nextAnnounce(ctx context.Context) (protocol.ID, bool) {
+	for _, queue := range s.announces {
+		select {
+		case hash := <-queue:
+			return hash, true
+		default:
+		}
+	}
+
+	select {
+	case <-ctx.Done():
+		return protocol.ID{}, false
+	case hash := <-s.announces[0]:
+		return hash, true
+	case hash := <-s.announces[1]:
+		return hash, true
+	case hash := <-s.announces[2]:
+		return hash, true
+	case hash := <-s.announces[3]:
+		return hash, true
+	}
+}
+
+// pickTracker returns a tracker that reported seeders for the hash and has announce budget left right now,
+// or the first such tracker after waiting for its budget.
+func (s *trackerScraper) pickTracker(ctx context.Context, seededBy uint32) (int, bool) {
+	first := -1
+
+	for i := range s.announceLimiters {
+		if seededBy&(1<<i) == 0 {
+			continue
+		}
+
+		if first < 0 {
+			first = i
+		}
+
+		if s.announceLimiters[i].Allow() {
+			return i, true
+		}
+	}
+
+	if first < 0 {
+		return 0, false
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, trackerAnnounceMaxWait)
+	defer cancel()
+
+	return first, s.announceLimiters[first].Wait(waitCtx) == nil
+}
+
 func (s *trackerScraper) runAnnounces(ctx context.Context) {
 	hosts := s.client.Trackers()
 
 	for {
-		select {
-		case <-ctx.Done():
+		hash, ok := s.nextAnnounce(ctx)
+		if !ok {
 			return
-		case job := <-s.announces:
-			host := hosts[job.tracker]
+		}
 
-			waitCtx, cancel := context.WithTimeout(ctx, trackerAnnounceMaxWait)
-			limitErr := s.announceLimiters[job.tracker].Wait(waitCtx)
+		info, _ := s.cache.Get(hash)
 
-			cancel()
+		index, ok := s.pickTracker(ctx, info.seededBy)
+		if !ok {
+			s.metrics.packets.With(prometheus.Labels{"tracker": "all", "result": "announce_rate_limited"}).Inc()
 
-			if limitErr != nil {
-				s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_rate_limited"}).Inc()
+			continue
+		}
 
-				continue
+		host := hosts[index]
+		result, err := s.client.Announce(ctx, index, hash, s.announceParams)
+
+		switch {
+		case err == nil && len(result.Peers) > 0:
+			s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_ok"}).Inc()
+
+			if s.onPeers != nil {
+				s.onPeers(ctx, hash, info.seeders, result.Peers)
 			}
-
-			result, err := s.client.Announce(ctx, job.tracker, job.hash, s.announceParams)
-
-			switch {
-			case err == nil && len(result.Peers) > 0:
-				s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_ok"}).Inc()
-
-				if s.onPeers != nil {
-					s.onPeers(ctx, job.hash, job.seeders, result.Peers)
-				}
-			case err == nil:
-				s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_no_peers"}).Inc()
-			case errors.Is(err, tracker.ErrTimeout):
-				s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_timeout"}).Inc()
-			default:
-				s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_error"}).Inc()
-			}
+		case err == nil:
+			s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_no_peers"}).Inc()
+		case errors.Is(err, tracker.ErrTimeout):
+			s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_timeout"}).Inc()
+		default:
+			s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_error"}).Inc()
 		}
 	}
 }

@@ -9,8 +9,10 @@ import (
 	"testing"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
+	dto "github.com/prometheus/client_model/go"
 )
 
 type closedNetworkRequester struct {
@@ -30,6 +32,70 @@ func (f closedNetworkRequester) Request(
 	}
 
 	return metainforequester.Response{}, errors.Join(metainforequester.ErrClosedNetworkPeer, errors.New("no metadata"))
+}
+
+type versionClient struct {
+	client.Client
+	versions map[netip.AddrPort]string
+}
+
+func (f versionClient) Ping(_ context.Context, addr netip.AddrPort) (client.PingResult, error) {
+	version, ok := f.versions[addr]
+	if !ok {
+		return client.PingResult{}, errors.New("no reply")
+	}
+
+	return client.PingResult{ClientID: version}, nil
+}
+
+func counted(t *testing.T, c *crawler, source string, stage string) float64 {
+	t.Helper()
+
+	m := &dto.Metric{}
+	if err := c.hashesTotal.WithLabelValues(source, stage).Write(m); err != nil {
+		t.Fatal(err)
+	}
+
+	return m.GetCounter().GetValue()
+}
+
+func TestSwarmClassFollowsTheNodeVersions(t *testing.T) {
+	t.Parallel()
+
+	peers, _ := testPeers(3)
+
+	for name, test := range map[string]struct {
+		versions map[netip.AddrPort]string
+		swarm    string
+	}{
+		"hint only": {map[netip.AddrPort]string{peers[0]: "LT\x01\x00", peers[1]: "LT\x01\x00"}, "swarm_hint_only"},
+		"mixed":     {map[netip.AddrPort]string{peers[0]: "LT\x01\x00", peers[1]: "LT\x02\x0b"}, "swarm_hint_mixed"},
+		"regular":   {map[netip.AddrPort]string{peers[0]: "UT\xb9\x1e", peers[1]: ""}, "swarm_regular"},
+		"silent":    {nil, "swarm_silent"},
+	} {
+		c := newTestCrawler(nil, nil)
+		c.client = versionClient{versions: test.versions}
+		c.metainfoRequester = closedNetworkRequester{calls: new(atomic.Int32)}
+
+		_, err := c.doRequestMetaInfo(context.Background(), sourceSample, protocol.ID{1}, peers)
+		if !errors.Is(err, errClosedSwarm) {
+			t.Fatalf("%s: want errClosedSwarm, got %v", name, err)
+		}
+
+		if got := counted(t, c, test.swarm, "closed_swarm"); got != 1 {
+			t.Errorf("%s: want one closed swarm counted as %s, got %v", name, test.swarm, got)
+		}
+
+		if test.swarm == "swarm_hint_only" {
+			if got := counted(t, c, "dial_"+implClosedHint, "closed_network_peer"); got != 2 {
+				t.Errorf("%s: want two dials to hinted peers, got %v", name, got)
+			}
+
+			if !c.pingCache.closedHint(peers[0]) || c.pingCache.closedHint(peers[2]) {
+				t.Errorf("%s: the ping cache must keep the hint of the nodes that carry it", name)
+			}
+		}
+	}
 }
 
 func testPeers(n int) ([]netip.AddrPort, map[netip.AddrPort]bool) {

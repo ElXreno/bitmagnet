@@ -27,6 +27,7 @@ var peerCodes = map[string]string{
 	"BU": "bigup",
 	"BW": "bittorrent-web",
 	"BX": "bittorrentx",
+	"CC": CC,
 	"CD": "enhanced-ctorrent",
 	"CT": "ctorrent",
 	"DE": "deluge",

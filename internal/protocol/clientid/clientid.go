@@ -6,12 +6,19 @@ const (
 	None      = "none"
 	Bitmagnet = "bitmagnet"
 	XT        = "xt"
+	CC        = "cc"
 )
 
 // ClosedNetwork reports whether a peer client belongs to a network that shares the DHT but keeps its swarms to
 // itself: its peers complete the handshake and never serve meta info.
 func ClosedNetwork(client string) bool {
-	return client == XT
+	return client == XT || client == CC
+}
+
+// ClosedNetworkNode reports whether a DHT node announces the version the XT nodes carry (libtorrent 1.0.0). Old
+// regular libtorrent clients announce it too, so this is a hint, not a verdict.
+func ClosedNetworkNode(version string) bool {
+	return version == "LT\x01\x00"
 }
 
 var peerPrefixes = []struct{ prefix, name string }{

@@ -1,7 +1,10 @@
 package server
 
 import (
+	"time"
+
 	"context"
+	"github.com/prometheus/client_golang/prometheus"
 	"net/netip"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/concurrency"
@@ -27,9 +30,39 @@ func (s queryLimiter) Query(
 	q string,
 	args dht.MsgArgs,
 ) (r dht.RecvMsg, err error) {
-	if limitErr := s.queryLimiter.Wait(ctx, addr.Addr().String()); limitErr != nil {
+	started := time.Now()
+	limitErr := s.queryLimiter.Wait(ctx, addr.Addr().String())
+	labels := prometheus.Labels{"query": q}
+
+	limiterWaitSeconds.With(labels).Add(time.Since(started).Seconds())
+	limiterWaitTotal.With(labels).Inc()
+
+	if limitErr != nil {
+		limiterWaitErrors.With(labels).Inc()
+
 		return r, limitErr
 	}
 
 	return s.server.Query(ctx, addr, q, args)
 }
+
+var limiterWaitSeconds = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: namespace,
+	Subsystem: subsystem,
+	Name:      "limiter_wait_seconds_total",
+	Help:      "Seconds outgoing DHT queries spent waiting in the per-address rate limiter.",
+}, []string{"query"})
+
+var limiterWaitTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: namespace,
+	Subsystem: subsystem,
+	Name:      "limiter_wait_total",
+	Help:      "A counter of outgoing DHT queries that passed through the rate limiter.",
+}, []string{"query"})
+
+var limiterWaitErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: namespace,
+	Subsystem: subsystem,
+	Name:      "limiter_wait_error_total",
+	Help:      "A counter of outgoing DHT queries abandoned while waiting in the rate limiter.",
+}, []string{"query"})

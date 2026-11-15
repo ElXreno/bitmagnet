@@ -32,6 +32,9 @@ type Result struct {
 	QuerySuccessTotal prometheus.Collector                    `group:"prometheus_collectors"`
 	QueryErrorTotal   prometheus.Collector                    `group:"prometheus_collectors"`
 	QueryConcurrency  prometheus.Collector                    `group:"prometheus_collectors"`
+	LimiterWait       prometheus.Collector                    `group:"prometheus_collectors"`
+	LimiterWaitTotal  prometheus.Collector                    `group:"prometheus_collectors"`
+	LimiterWaitErrors prometheus.Collector                    `group:"prometheus_collectors"`
 }
 
 const (
@@ -88,5 +91,8 @@ func New(p Params) Result {
 		QuerySuccessTotal: collector.querySuccessTotal,
 		QueryErrorTotal:   collector.queryErrorTotal,
 		QueryConcurrency:  collector.queryConcurrency,
+		LimiterWait:       limiterWaitSeconds,
+		LimiterWaitTotal:  limiterWaitTotal,
+		LimiterWaitErrors: limiterWaitErrors,
 	}
 }

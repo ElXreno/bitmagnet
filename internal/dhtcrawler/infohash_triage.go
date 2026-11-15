@@ -107,20 +107,28 @@ func (c *crawler) runInfoHashTriage(
 					(t.FilesStatus == model.FilesStatusOverThreshold && t.FilesCount.Uint <= c.saveFilesThreshold) {
 					c.countHash(r.source, stageNeedsMetaInfo, 1)
 
+					sendOne := time.Now()
+
 					select {
 					case <-ctx.Done():
 						return
 					case c.getPeers.In() <- r:
+						c.countHash(name, "send_get_peers_us", int(time.Since(sendOne).Microseconds()))
+
 						continue
 					}
 				} else if r.source == sourceSample && ((!t.Seeders.Valid || !t.Leechers.Valid) ||
 					t.UpdatedAt.Before(time.Now().Add(-c.rescrapeThreshold))) {
 					c.countHash(r.source, stageScrape, 1)
 
+					sendOne := time.Now()
+
 					select {
 					case <-ctx.Done():
 						return
 					case c.scrape.In() <- r:
+						c.countHash(name, "send_scrape_us", int(time.Since(sendOne).Microseconds()))
+
 						continue
 					}
 				} else {

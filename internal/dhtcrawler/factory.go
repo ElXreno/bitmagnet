@@ -51,6 +51,7 @@ type Result struct {
 	StageGauge     prometheus.Collector `group:"prometheus_collectors"`
 	ProbeTotal     prometheus.Collector `group:"prometheus_collectors"`
 	LookupQueries  prometheus.Collector `group:"prometheus_collectors"`
+	ClassTotal     prometheus.Collector `group:"prometheus_collectors"`
 	TrackerPackets prometheus.Collector `group:"prometheus_collectors"`
 	TrackerHashes  prometheus.Collector `group:"prometheus_collectors"`
 	TrackerOutcome prometheus.Collector `group:"prometheus_collectors"`
@@ -79,6 +80,12 @@ func New(params Params) Result {
 		Name:      "stage_load",
 		Help:      "Queued items and busy workers of each pipeline stage.",
 	}, []string{"stage", "kind"})
+	classTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bitmagnet",
+		Subsystem: "dht_crawler",
+		Name:      "sample_class_total",
+		Help:      "Sampling funnel by the kind of node that gave the info hashes.",
+	}, []string{"family", "class", "stage"})
 	lookupQueries := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "bitmagnet",
 		Subsystem: "dht_crawler",
@@ -173,6 +180,7 @@ func New(params Params) Result {
 						stageGauge:    stageGauge,
 						probeTotal:    probeTotal,
 						lookupQueries: lookupQueries,
+						classTotal:    classTotal,
 						trackers:      trackers,
 						trackers6:     trackers6,
 						failed:        failed,
@@ -248,6 +256,7 @@ func New(params Params) Result {
 		StageGauge:       stageGauge,
 		ProbeTotal:       probeTotal,
 		LookupQueries:    lookupQueries,
+		ClassTotal:       classTotal,
 		TrackerPackets:   trackerMetrics.packets,
 		TrackerHashes:    trackerMetrics.hashes,
 		TrackerOutcome:   trackerMetrics.outcome,

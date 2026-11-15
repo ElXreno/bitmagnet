@@ -130,6 +130,7 @@ func (a serverAdapter) SampleInfoHashes(
 		Nodes:    a.extractNodes(res.Msg),
 		Num:      totalNum,
 		Interval: interval,
+		Client:   res.Msg.ClientID,
 	}, nil
 }
 

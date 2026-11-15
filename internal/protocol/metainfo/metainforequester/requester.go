@@ -19,7 +19,9 @@ import (
 	"github.com/anacrolix/torrent/peer_protocol"
 	"github.com/anacrolix/utp"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/clientid"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type Requester interface {
@@ -180,6 +182,9 @@ func (r requester) request(
 		return Response{}, btHandshakeErr
 	}
 
+	peerClient := clientid.Peer([20]byte(hsInfo.PeerID))
+	peerClientTotal.With(prometheus.Labels{"client": peerClient, "stage": "handshake"}).Inc()
+
 	metadataSize, utMetadata, exHandshakeErr := exHandshake(rw)
 	if exHandshakeErr != nil {
 		return Response{}, exHandshakeErr
@@ -198,6 +203,8 @@ func (r requester) request(
 	if parseErr != nil {
 		return Response{}, parseErr
 	}
+
+	peerClientTotal.With(prometheus.Labels{"client": peerClient, "stage": "metainfo"}).Inc()
 
 	return Response{
 		HandshakeInfo: hsInfo,

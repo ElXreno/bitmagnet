@@ -31,6 +31,7 @@ type Result struct {
 	RequestConcurrency  prometheus.Collector `group:"prometheus_collectors"`
 	LimiterWaitSeconds  prometheus.Collector `group:"prometheus_collectors"`
 	LimiterResultTotal  prometheus.Collector `group:"prometheus_collectors"`
+	PeerClientTotal     prometheus.Collector `group:"prometheus_collectors"`
 }
 
 func New(p Params) Result {
@@ -72,6 +73,7 @@ func New(p Params) Result {
 		RequestConcurrency:  collector.requestConcurrency,
 		LimiterWaitSeconds:  limiterWaitSeconds,
 		LimiterResultTotal:  limiterResultTotal,
+		PeerClientTotal:     peerClientTotal,
 	}
 }
 

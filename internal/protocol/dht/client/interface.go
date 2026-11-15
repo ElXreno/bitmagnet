@@ -42,6 +42,7 @@ type GetPeersScrapeResult struct {
 
 type SampleInfoHashesResult struct {
 	ID       protocol.ID
+	Client   string
 	Samples  []protocol.ID
 	Nodes    []NodeInfo
 	Num      int

@@ -45,6 +45,7 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 
 		c.fetched.add(req.infoHash)
 		c.countHash(req.source, stageMetaInfoOK, 1)
+		c.countClass(req.nodeHasPeersForHash, stageMetaInfoOK, 1)
 
 		if req.visit != "" {
 			c.countHash(req.source, stageMetaInfoOK+"_"+req.visit, 1)

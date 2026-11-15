@@ -11,8 +11,12 @@ func (c *crawler) runScrape(ctx context.Context) {
 	_ = c.scrape.Run(ctx, func(req nodeHasPeersForHash) {
 		pfh, pfhErr := c.requestScrape(ctx, req)
 		if pfhErr != nil {
+			c.countClass(req, "scrape_error", 1)
+
 			return
 		}
+
+		c.countClass(req, "scrape_ok", 1)
 		select {
 		case <-ctx.Done():
 		case c.persistSources.In() <- infoHashWithScrape{

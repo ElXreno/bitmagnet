@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/clientid"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -14,6 +15,7 @@ type prometheusCollector struct {
 	querySuccessTotal *prometheus.CounterVec
 	queryErrorTotal   *prometheus.CounterVec
 	queryConcurrency  *prometheus.GaugeVec
+	nodeClientTotal   *prometheus.CounterVec
 }
 
 const (
@@ -50,6 +52,12 @@ func newPrometheusCollector() prometheusCollector {
 			Name:      "query_concurrency",
 			Help:      "Number of concurrent DHT queries.",
 		}, labelNames),
+		nodeClientTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "node_client_total",
+			Help:      "A counter of answered DHT queries by the implementation the node announces.",
+		}, []string{labelFamily, "client"}),
 	}
 }
 
@@ -86,6 +94,10 @@ func (s prometheusServerWrapper) Query(
 	if err == nil {
 		s.queryDuration.With(labels).Observe(time.Since(start).Seconds())
 		s.querySuccessTotal.With(labels).Inc()
+		s.nodeClientTotal.With(prometheus.Labels{
+			labelFamily: labels[labelFamily],
+			"client":    clientid.Node(res.Msg.ClientID),
+		}).Inc()
 	} else {
 		s.queryErrorTotal.With(labels).Inc()
 	}

@@ -41,6 +41,7 @@ type crawler struct {
 	stageGauge                   *prometheus.GaugeVec
 	probeTotal                   *prometheus.CounterVec
 	lookupQueries                *prometheus.HistogramVec
+	classTotal                   *prometheus.CounterVec
 	deadPeers                    *ignoreFilter
 	pingCache                    *pingCache
 	trackers                     *trackerScraper
@@ -130,6 +131,7 @@ type nodeHasPeersForHash struct {
 	source   string
 	peers    []netip.AddrPort
 	visit    string
+	class    string
 }
 
 const (

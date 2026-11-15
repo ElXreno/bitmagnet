@@ -58,3 +58,10 @@ func (r requestLimiter) Request(ctx context.Context, infoHash protocol.ID, node 
 
 	return r.requester.Request(ctx, infoHash, node)
 }
+
+var peerClientTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: namespace,
+	Subsystem: subsystem,
+	Name:      "peer_client_total",
+	Help:      "A counter of peers by BitTorrent client, at the handshake and after a complete meta info fetch.",
+}, []string{"client", "stage"})

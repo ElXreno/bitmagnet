@@ -29,8 +29,10 @@ func (c *crawler) runGetPeers(ctx context.Context) {
 		if pfhErr != nil {
 			if errors.Is(pfhErr, errNoPeers) {
 				c.countHash(req.source, stageNoPeers, 1)
+				c.countClass(req, stageNoPeers, 1)
 			} else {
 				c.countHash(req.source, stageGetPeersError, 1)
+				c.countClass(req, stageGetPeersError, 1)
 			}
 
 			if c.unseeded(req.infoHash) {
@@ -54,6 +56,7 @@ func (c *crawler) runGetPeers(ctx context.Context) {
 		}
 
 		c.countHash(req.source, stagePeersFound, 1)
+		c.countClass(req, stagePeersFound, 1)
 		c.countHash(req.source, stagePeersSum, len(pfh.peers))
 		c.forwardPeers(ctx, req, pfh.peers)
 	})

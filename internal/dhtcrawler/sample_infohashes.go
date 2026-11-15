@@ -6,7 +6,10 @@ import (
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/clientid"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func (c *crawler) getNodesForSampleInfoHashes(ctx context.Context, f *nodeFamily) {
@@ -64,9 +67,16 @@ func (c *crawler) sampleNode(ctx context.Context, f *nodeFamily, n ktable.Node) 
 		}
 
 		visit := c.countSampledNode(f, n.ID(), res.Num, res.Interval, len(res.Samples), len(discoveredHashes))
+		class := nodeClass(n.ID(), res.Client, res.Interval)
 		for i := range discoveredHashes {
 			discoveredHashes[i].visit = visit
+			discoveredHashes[i].class = class
 		}
+
+		sampled := nodeHasPeersForHash{node: n.Addr(), class: class}
+		c.countClass(sampled, "nodes", 1)
+		c.countClass(sampled, "samples", len(res.Samples))
+		c.countClass(sampled, "fresh", len(discoveredHashes))
 
 		c.countHash("sample_nodes"+f.suffix, "revisit_"+f.revisits.plan(n, res.Num, len(res.Samples), len(discoveredHashes)), 1)
 		c.countHash(source, stageDiscovered, len(discoveredHashes))
@@ -156,4 +166,30 @@ func (c *crawler) countSampledNode(
 	}
 
 	return visit
+}
+
+// nodeClass tells ordinary clients from crawlers by the node id marker and the sampling interval.
+func nodeClass(id protocol.ID, announced string, interval int) string {
+	class := clientid.Node(announced)
+	if clientid.IsBitmagnetNode([20]byte(id)) {
+		class = clientid.Bitmagnet
+	}
+
+	if interval <= 60 {
+		class += "_short"
+	}
+
+	return class
+}
+
+func (c *crawler) countClass(r nodeHasPeersForHash, stage string, n int) {
+	if r.class == "" {
+		return
+	}
+
+	c.classTotal.With(prometheus.Labels{
+		"family": dht.Family(r.node.Addr()),
+		"class":  r.class,
+		"stage":  stage,
+	}).Add(float64(n))
 }

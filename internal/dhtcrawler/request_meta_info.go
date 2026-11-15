@@ -37,7 +37,10 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 	})
 }
 
-const metaInfoParallelDials = 4
+const (
+	metaInfoParallelDials      = 4
+	metaInfoMaxUnansweredDials = 4
+)
 
 func (c *crawler) doRequestMetaInfo(
 	ctx context.Context,
@@ -53,46 +56,75 @@ func (c *crawler) doRequestMetaInfo(
 	dialCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	results := make(chan dialResult, len(peers))
+	type candidate struct {
+		addr netip.AddrPort
+		prev string
+		ping string
+	}
+
+	probed := make(chan candidate, len(peers))
+
+	for _, p := range peers {
+		go func() {
+			cand := candidate{addr: p, prev: "new", ping: "ok"}
+			if c.deadPeers.test(peerKey(p)) {
+				cand.prev = "dead"
+			}
+
+			pingCtx, pingCancel := context.WithTimeout(ctx, peerProbeTimeout)
+			defer pingCancel()
+
+			if _, pingErr := c.client.Ping(pingCtx, p); pingErr != nil {
+				cand.ping = "fail"
+			}
+
+			probed <- cand
+		}()
+	}
+
+	candidates := make([]candidate, 0, len(peers))
+
+	var unanswered []candidate
+
+	for range peers {
+		cand := <-probed
+
+		switch {
+		case cand.ping == "ok":
+			candidates = append(candidates, cand)
+		case cand.prev == "dead":
+			c.probeTotal.With(prometheus.Labels{"prev": cand.prev, "ping": cand.ping, "dial": "skipped_dead"}).Inc()
+		case len(unanswered) < metaInfoMaxUnansweredDials:
+			unanswered = append(unanswered, cand)
+		default:
+			c.probeTotal.With(prometheus.Labels{"prev": cand.prev, "ping": cand.ping, "dial": "skipped_cap"}).Inc()
+		}
+	}
+
+	candidates = append(candidates, unanswered...)
+
+	results := make(chan dialResult, len(candidates))
 	next := 0
 	inflight := 0
 
 	var errs []error
 
 	for {
-		for inflight < metaInfoParallelDials && next < len(peers) {
-			p := peers[next]
+		for inflight < metaInfoParallelDials && next < len(candidates) {
+			cand := candidates[next]
 			next++
 			inflight++
 
 			go func() {
-				prev := "new"
-				if c.deadPeers.test(peerKey(p)) {
-					prev = "dead"
-				}
-
-				pinged := make(chan string, 1)
-
-				go func() {
-					pingCtx, pingCancel := context.WithTimeout(ctx, peerProbeTimeout)
-					defer pingCancel()
-
-					if _, pingErr := c.client.Ping(pingCtx, p); pingErr != nil {
-						pinged <- "fail"
-					} else {
-						pinged <- "ok"
-					}
-				}()
-
-				res, err := c.metainfoRequester.Request(dialCtx, hash, p)
+				res, err := c.metainfoRequester.Request(dialCtx, hash, cand.addr)
 				outcome := dialOutcome(err)
 
 				if outcome == "timeout" || outcome == "refused" || outcome == "unreachable" {
-					c.deadPeers.add(peerKey(p))
+					c.deadPeers.add(peerKey(cand.addr))
 				}
 
 				if outcome != "skipped" {
-					c.probeTotal.With(prometheus.Labels{"prev": prev, "ping": <-pinged, "dial": outcome}).Inc()
+					c.probeTotal.With(prometheus.Labels{"prev": cand.prev, "ping": cand.ping, "dial": outcome}).Inc()
 				}
 
 				results <- dialResult{res: res, err: err}
@@ -131,7 +163,7 @@ func (c *crawler) doRequestMetaInfo(
 	return metainforequester.Response{}, errors.Join(errs...)
 }
 
-const peerProbeTimeout = 1500 * time.Millisecond
+const peerProbeTimeout = 800 * time.Millisecond
 
 func peerKey(p netip.AddrPort) protocol.ID {
 	var id protocol.ID

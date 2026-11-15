@@ -39,6 +39,7 @@ type crawler struct {
 	dialsTotal                   *prometheus.CounterVec
 	stageGauge                   *prometheus.GaugeVec
 	probeTotal                   *prometheus.CounterVec
+	lookupQueries                *prometheus.HistogramVec
 	deadPeers                    *ignoreFilter
 	nodePool                     *nodePool
 	nodesForPing                 concurrency.BufferedConcurrentChannel[ktable.Node]

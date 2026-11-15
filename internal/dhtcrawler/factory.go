@@ -48,6 +48,7 @@ type Result struct {
 	DialsTotal     prometheus.Collector `group:"prometheus_collectors"`
 	StageGauge     prometheus.Collector `group:"prometheus_collectors"`
 	ProbeTotal     prometheus.Collector `group:"prometheus_collectors"`
+	LookupQueries  prometheus.Collector `group:"prometheus_collectors"`
 }
 
 func New(params Params) Result {
@@ -73,6 +74,13 @@ func New(params Params) Result {
 		Name:      "stage_load",
 		Help:      "Queued items and busy workers of each pipeline stage.",
 	}, []string{"stage", "kind"})
+	lookupQueries := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "bitmagnet",
+		Subsystem: "dht_crawler",
+		Name:      "lookup_queries",
+		Help:      "Answered get_peers queries of a lookup until the first peers arrived, or all of them when none did.",
+		Buckets:   []float64{1, 2, 3, 4, 6, 8, 12, 16, 24},
+	}, []string{"source", "result"})
 	probeTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "bitmagnet",
 		Subsystem: "dht_crawler",
@@ -121,11 +129,12 @@ func New(params Params) Result {
 						inboundSeen: &ignoreFilter{
 							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
 						},
-						hashesTotal: hashesTotal,
-						dialsTotal:  dialsTotal,
-						stageGauge:  stageGauge,
-						probeTotal:  probeTotal,
-						nodePool:    newNodePool(),
+						hashesTotal:   hashesTotal,
+						dialsTotal:    dialsTotal,
+						stageGauge:    stageGauge,
+						probeTotal:    probeTotal,
+						lookupQueries: lookupQueries,
+						nodePool:      newNodePool(),
 						deadPeers: &ignoreFilter{
 							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
 						},
@@ -198,6 +207,7 @@ func New(params Params) Result {
 		DialsTotal:       dialsTotal,
 		StageGauge:       stageGauge,
 		ProbeTotal:       probeTotal,
+		LookupQueries:    lookupQueries,
 		DhtCrawlerActive: active,
 	}
 }

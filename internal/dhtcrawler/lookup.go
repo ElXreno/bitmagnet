@@ -4,25 +4,39 @@ import (
 	"bytes"
 	"context"
 	"net/netip"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/server"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 const (
-	lookupAlpha        = 6
-	lookupDeadline     = 10 * time.Second
-	lookupMaxQueries   = 24
-	lookupEnoughPeers  = 8
-	lookupMaxPeers     = 16
-	lookupQueryTimeout = 2 * time.Second
-
+	lookupEnoughPeers    = 8
+	lookupMaxPeers       = 16
+	lookupDeadline       = 10 * time.Second
+	lookupQueryTimeout   = 2 * time.Second
 	lookupMaxLimiterWait = 50 * time.Millisecond
 	lookupPoolSeeds      = 16
 )
+
+var (
+	lookupAlpha           = envInt("BITMAGNET_LOOKUP_ALPHA", 6)
+	lookupMaxQueries      = envInt("BITMAGNET_LOOKUP_MAX_QUERIES", 24)
+	lookupExtraAfterPeers = envInt("BITMAGNET_LOOKUP_EXTRA_AFTER_PEERS", 6)
+)
+
+func envInt(name string, fallback int) int {
+	if v, err := strconv.Atoi(os.Getenv(name)); err == nil && v > 0 {
+		return v
+	}
+
+	return fallback
+}
 
 type lookupNode struct {
 	id       protocol.ID
@@ -72,6 +86,8 @@ func (c *crawler) lookupPeers(
 	queries := 0
 	inflight := 0
 	afterFirstPeers := 0
+	completed := 0
+	firstPeersAt := 0
 	stop := false
 
 	type lookupResult struct {
@@ -119,6 +135,7 @@ func (c *crawler) lookupPeers(
 
 		r := <-results
 		inflight--
+		completed++
 
 		if len(peers) > 0 {
 			afterFirstPeers++
@@ -143,12 +160,22 @@ func (c *crawler) lookupPeers(
 			}
 		}
 
-		if len(peers) >= lookupEnoughPeers || afterFirstPeers >= lookupAlpha || lookupCtx.Err() != nil {
-			stop = true
+		if firstPeersAt == 0 && len(peers) > 0 {
+			firstPeersAt = completed
+		}
+
+		if len(peers) >= lookupEnoughPeers || afterFirstPeers >= lookupExtraAfterPeers || lookupCtx.Err() != nil {
+			break
 		}
 	}
 
 	c.countHash(source, stageLookupQueries, queries)
+
+	if len(peers) > 0 {
+		c.lookupQueries.With(prometheus.Labels{"source": source, "result": "found"}).Observe(float64(firstPeersAt))
+	} else {
+		c.lookupQueries.With(prometheus.Labels{"source": source, "result": "empty"}).Observe(float64(completed))
+	}
 
 	result := make([]netip.AddrPort, 0, len(peers))
 	for p := range peers {

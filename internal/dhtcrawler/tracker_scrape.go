@@ -33,6 +33,11 @@ var defaultTrackers = []string{
 	"tracker.opentrackr.org:1337",
 	"open.stealth.si:80",
 	"tracker.torrent.eu.org:451",
+	"open.demonii.com:1337",
+	"tracker.qu.ax:6969",
+	"tracker-udp.gbitt.info:80",
+	"retracker01-msk-virt.corbina.net:80",
+	"t.overflow.biz:6969",
 }
 
 type trackerMetrics struct {
@@ -134,7 +139,7 @@ func newTrackerScraper(metrics trackerMetrics) (*trackerScraper, error) {
 	}
 
 	if os.Getenv("BITMAGNET_TRACKER_ANNOUNCE") != "off" {
-		announcesPerSecond := envInt("BITMAGNET_TRACKER_ANNOUNCE_PPS", 20)
+		announcesPerSecond := envInt("BITMAGNET_TRACKER_ANNOUNCE_PPS", 30)
 
 		scraper.announceEnabled = true
 

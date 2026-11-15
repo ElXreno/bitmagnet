@@ -44,6 +44,7 @@ func TestBothRoutingTablesAreWired(t *testing.T) {
 			NewDefaultConfig,
 			func() *zap.SugaredLogger { return zap.NewNop().Sugar() },
 			func() metainforequester.Requester { return fakeRequester{} },
+			func() metainforequester.Receiver { return metainforequester.Receiver{} },
 			func() lazy.Lazy[search.Search] { return nil },
 			func() lazy.Lazy[*dao.Query] { return nil },
 			func() lazy.Lazy[blocking.Manager] { return nil },

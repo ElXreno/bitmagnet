@@ -34,16 +34,19 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 				c.countHash(req.source, "no_candidates", 1)
 				c.trackerOutcome(req.infoHash, "no_candidates")
 				c.giveUp(req.infoHash)
+				c.inbound.register(req.nodeHasPeersForHash)
 			} else {
 				c.countHash(req.source, stageMetaInfoFail, 1)
 				c.trackerOutcome(req.infoHash, stageMetaInfoFail)
 				c.giveUp(req.infoHash)
+				c.inbound.register(req.nodeHasPeersForHash)
 			}
 
 			return
 		}
 
 		c.fetched.add(req.infoHash)
+		c.inbound.fetchedOutgoing(req.infoHash)
 		c.countHash(req.source, stageMetaInfoOK, 1)
 		c.countClass(req.nodeHasPeersForHash, stageMetaInfoOK, 1)
 

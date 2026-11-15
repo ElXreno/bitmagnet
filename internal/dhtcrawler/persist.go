@@ -138,7 +138,12 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 				for _, i := range hashMap {
 					c.countHash(i.source, stagePersisted, 1)
 
-					if !isSampleSource(i.source) && !isSampleLookupSource(i.source) {
+					origin := i.source
+					if i.origin != "" {
+						origin = i.origin
+					}
+
+					if !isSampleSource(origin) && !isSampleLookupSource(origin) {
 						continue
 					}
 

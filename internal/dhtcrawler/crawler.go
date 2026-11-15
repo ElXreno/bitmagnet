@@ -49,6 +49,7 @@ type crawler struct {
 	fetched                      *ignoreFilter
 	failed                       *failedHashes
 	failedSeeded                 *failedHashes
+	inbound                      *inboundPeers
 	infoHashTriage               concurrency.BatchingChannel[nodeHasPeersForHash]
 	getPeers                     concurrency.BufferedConcurrentChannel[nodeHasPeersForHash]
 	lookups                      concurrency.BufferedConcurrentChannel[lookupRequest]
@@ -118,6 +119,7 @@ func (c *crawler) start() {
 
 	go c.trackers.run(ctx)
 	go c.trackers6.run(ctx)
+	go c.inbound.run(ctx)
 	go c.runRequestMetaInfo(ctx)
 	go c.runScrape(ctx)
 	go c.reseedBootstrapNodes(ctx)
@@ -133,6 +135,7 @@ type nodeHasPeersForHash struct {
 	peers    []netip.AddrPort
 	visit    string
 	class    string
+	origin   string
 }
 
 const (

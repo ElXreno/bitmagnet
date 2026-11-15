@@ -111,6 +111,11 @@ type trackerScraper struct {
 	announceLimiters []*rate.Limiter
 	announceParams   tracker.AnnounceParams
 	onPeers          func(ctx context.Context, hash protocol.ID, source string, peers []netip.AddrPort)
+	holdQueues       [][announcePriorities]chan holdJob
+	holdParams       tracker.AnnounceParams
+	holdMu           sync.Mutex
+	held             map[protocol.ID]heldSwarm
+	onHeld           func(hash protocol.ID)
 	prefix           string
 	hosts            []string
 	mu               sync.Mutex
@@ -413,19 +418,30 @@ func (c *crawler) unseeded(hash protocol.ID) bool {
 	return swarm == "leechers" || swarm == "unknown"
 }
 
+type announceJob struct {
+	hash    protocol.ID
+	seeders uint32
+	hold    bool
+	stop    bool
+}
+
 // nextAnnounce pops the queued hash with the most seeders for tracker number index.
-func (s *trackerScraper) nextAnnounce(index int) (protocol.ID, trackerInfo, bool) {
-	for _, queue := range s.announces[index] {
+func (s *trackerScraper) nextAnnounce(index int) (announceJob, bool) {
+	for priority, queue := range s.announces[index] {
 		select {
 		case hash := <-queue:
 			info, _ := s.cache.Get(hash)
 
-			return hash, info, true
+			return announceJob{hash: hash, seeders: info.seeders}, true
 		default:
+		}
+
+		if job, ok := s.nextHold(index, priority); ok {
+			return job, true
 		}
 	}
 
-	return protocol.ID{}, trackerInfo{}, false
+	return announceJob{}, false
 }
 
 func (s *trackerScraper) runAnnounces(ctx context.Context, index int) {
@@ -436,7 +452,7 @@ func (s *trackerScraper) runAnnounces(ctx context.Context, index int) {
 			return
 		}
 
-		hash, info, ok := s.nextAnnounce(index)
+		job, ok := s.nextAnnounce(index)
 		if !ok {
 			select {
 			case <-ctx.Done():
@@ -447,7 +463,14 @@ func (s *trackerScraper) runAnnounces(ctx context.Context, index int) {
 			continue
 		}
 
-		go s.announce(ctx, index, host, hash, info.seeders)
+		switch {
+		case job.stop:
+			go s.announceStop(ctx, index, host, job.hash)
+		case job.hold:
+			go s.announceHold(ctx, index, host, job.hash)
+		default:
+			go s.announce(ctx, index, host, job.hash, job.seeders)
+		}
 	}
 }
 

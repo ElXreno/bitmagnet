@@ -14,6 +14,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/responder"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/server"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/banning"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
 	"github.com/bitmagnet-io/bitmagnet/internal/worker"
@@ -30,6 +31,8 @@ type Params struct {
 	KTable6           ktable.Table `name:"dht_ktable_ipv6"`
 	Client            lazy.Lazy[client.Client]
 	MetainfoRequester metainforequester.Requester
+	MetainfoReceiver  metainforequester.Receiver
+	DhtServerConfig   server.Config
 	BanningChecker    banning.Checker `name:"metainfo_banning_checker"`
 	Search            lazy.Lazy[search.Search]
 	Dao               lazy.Lazy[*dao.Query]
@@ -238,6 +241,7 @@ func New(params Params) Result {
 						logger:          params.Logger.Named("dht_crawler"),
 					}
 					c.soughtNodeID.Set(protocol.RandomNodeID())
+					c.setupInboundPeers(params.MetainfoReceiver, params.DhtServerConfig.Port)
 
 					// todo: Fix!
 					//nolint:contextcheck

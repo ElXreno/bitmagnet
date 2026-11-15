@@ -48,6 +48,13 @@ func (c *crawler) reportStages(ctx context.Context) {
 				c.stageGauge.With(prometheus.Labels{"stage": "discovered_nodes6", "kind": "queued"}).
 					Set(float64(len(c.v6.discovered)))
 			}
+
+			if c.inbound != nil {
+				c.stageGauge.With(prometheus.Labels{"stage": "inbound_registry", "kind": "queued"}).
+					Set(float64(c.inbound.size()))
+				c.stageGauge.With(prometheus.Labels{"stage": "inbound_conns", "kind": "active"}).
+					Set(float64(len(c.inbound.slots)))
+			}
 		}
 	}
 }

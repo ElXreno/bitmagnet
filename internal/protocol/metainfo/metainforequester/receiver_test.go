@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,12 +48,13 @@ func listenLoopback(t *testing.T) net.Listener {
 }
 
 type received struct {
-	in    *Incoming
-	res   Response
-	err   error
-	seen  peertest.Seen
-	fake  error
-	spent int64
+	in      *Incoming
+	res     Response
+	err     error
+	seen    peertest.Seen
+	fake    error
+	spent   int64
+	parsing int
 }
 
 func receive(t *testing.T, peer peertest.Peer, keys []protocol.ID) received {
@@ -95,6 +97,7 @@ func receiveWith(t *testing.T, receiver Receiver, peer peertest.Peer, keys []pro
 	fake := <-done
 	result.seen, result.fake = fake.seen, fake.err
 	result.spent = receiver.pending.Load()
+	result.parsing = len(receiver.parsing)
 
 	return result
 }
@@ -130,7 +133,7 @@ func TestReceivePlaintextAndMSE(t *testing.T) {
 			t.Fatalf("%s: the peer saw id %q and bits %x", name, got.seen.PeerID[:], got.seen.Reserved)
 		}
 
-		if got.seen.Requests != 2 || got.spent != 0 {
+		if got.seen.Requests != 2 || got.spent != 0 || got.parsing != 0 {
 			t.Fatalf("%s: %d piece requests, %d bytes still reserved", name, got.seen.Requests, got.spent)
 		}
 	}
@@ -201,8 +204,8 @@ func TestReceiveRejectsMetadataOfAnotherTorrent(t *testing.T) {
 	other, _ := testMetadata(t, "forged")
 
 	got := receive(t, peertest.Peer{InfoHash: hash, Metadata: other}, nil)
-	if got.err == nil {
-		t.Fatalf("meta info that does not hash to the info hash was accepted as %q", got.res.Info.Name)
+	if got.err == nil || !strings.Contains(got.err.Error(), "wrong hash") {
+		t.Fatalf("meta info of another torrent: want the hash check to refuse it, got %v", got.err)
 	}
 
 	if got.seen.Requests != 2 {
@@ -299,7 +302,14 @@ func TestBencodeUnsafe(t *testing.T) {
 		"raw bytes after the value":     {append([]byte("d5:piecei0ee"), bytes.Repeat([]byte("l"), 5000)...), false},
 		"not bencode":                   {[]byte("hello"), false},
 		"number without an end":         {[]byte("d1:xi5"), false},
-		"empty":                         {nil, false},
+		"length without a colon":        {[]byte("d1:x12345"), false},
+		"padded length before nesting": {
+			append(append([]byte("d1:a0000000000000000000005:hello1:z"), nested(100)...), 'e'), true,
+		},
+		"chain of directories": {
+			append(append([]byte("d9:file tree"), nested(incomingMaxDepth)...), 'e'), true,
+		},
+		"empty": {nil, false},
 	} {
 		if got := bencodeUnsafe(test.value, incomingMaxDepth); got != test.unsafe {
 			t.Errorf("%s: unsafe %v, want %v", name, got, test.unsafe)
@@ -311,7 +321,7 @@ func TestBencodeUnsafe(t *testing.T) {
 	hash := protocol.ID(mi.HashBytes(hostile))
 
 	got := receive(t, peertest.Peer{InfoHash: hash, Metadata: hostile}, nil)
-	if !errors.Is(got.err, errIncomingBencode) {
+	if !errors.Is(got.err, errIncomingBencode) || got.parsing != 0 {
 		t.Fatalf("meta info nested 3000 deep with a matching hash: want errIncomingBencode, got %v", got.err)
 	}
 

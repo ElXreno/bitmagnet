@@ -36,14 +36,16 @@ const (
 
 	incomingMaxExtended = metadataPieceSize + 1024
 	incomingMaxMessage  = 1 << 20
-	incomingMaxDepth    = 1024
+	incomingMaxDepth    = 32
 	incomingBudget      = 256 << 20
+	incomingParses      = 2
 )
 
 type Receiver struct {
 	clientID protocol.ID
 	timeout  time.Duration
 	pending  *atomic.Int64
+	parsing  chan struct{}
 }
 
 func NewReceiver(clientID protocol.ID, timeout time.Duration) Receiver {
@@ -51,7 +53,23 @@ func NewReceiver(clientID protocol.ID, timeout time.Duration) Receiver {
 		clientID: clientID,
 		timeout:  timeout,
 		pending:  new(atomic.Int64),
+		parsing:  make(chan struct{}, incomingParses),
 	}
+}
+
+// the file tree decoder copies a subtree once per level above it, so few meta infos are parsed at a time
+func (r Receiver) parse(infoHash protocol.ID, encoded []byte) (metainfo.Info, error) {
+	r.parsing <- struct{}{}
+
+	defer func() {
+		<-r.parsing
+	}()
+
+	if bencodeUnsafe(encoded, incomingMaxDepth) {
+		return metainfo.Info{}, errIncomingBencode
+	}
+
+	return metainfo.ParseMetaInfoBytes(infoHash, encoded)
 }
 
 func (r Receiver) PeerID() protocol.ID {
@@ -218,13 +236,7 @@ func (in *Incoming) Fetch() (Response, error) {
 		return Response{}, piecesErr
 	}
 
-	if bencodeUnsafe(pieces, incomingMaxDepth) {
-		outcome("bad_metainfo")
-
-		return Response{}, errIncomingBencode
-	}
-
-	parsed, parseErr := metainfo.ParseMetaInfoBytes(in.InfoHash, pieces)
+	parsed, parseErr := in.receiver.parse(in.InfoHash, pieces)
 	if parseErr != nil {
 		outcome("bad_metainfo")
 
@@ -324,23 +336,27 @@ func bencodeUnsafe(b []byte, limit int) bool {
 
 			i += end + 1
 		case c >= '0' && c <= '9':
-			colon := bytes.IndexByte(b[i:min(len(b), i+12)], ':')
-			if colon < 0 {
+			colon := i
+			for colon < len(b) && b[colon] >= '0' && b[colon] <= '9' {
+				colon++
+			}
+
+			if colon == len(b) || b[colon] != ':' {
 				return false
 			}
 
-			length, err := strconv.Atoi(string(b[i : i+colon]))
+			length, err := strconv.ParseInt(string(b[i:colon]), 10, 64)
 			if err != nil {
 				return false
 			}
 
-			i += colon + 1
+			i = colon + 1
 
-			if length > len(b)-i {
+			if length > int64(len(b)-i) {
 				return true
 			}
 
-			i += length
+			i += int(length)
 		default:
 			return false
 		}

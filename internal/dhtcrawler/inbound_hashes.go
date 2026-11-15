@@ -11,13 +11,15 @@ func (c *crawler) runInboundHashes(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case h := <-c.inboundHashes:
+			source := h.Query + c.family(h.Node.Addr()).suffix
+
 			if c.inboundSeen.testAndAdd(h.InfoHash) {
-				c.countHash(h.Query, stageDuplicate, 1)
+				c.countHash(source, stageDuplicate, 1)
 
 				continue
 			}
 
-			c.countHash(h.Query, stageDiscovered, 1)
+			c.countHash(source, stageDiscovered, 1)
 
 			select {
 			case <-ctx.Done():
@@ -25,7 +27,7 @@ func (c *crawler) runInboundHashes(ctx context.Context) {
 			case c.inboundTriage.In() <- nodeHasPeersForHash{
 				infoHash: h.InfoHash,
 				node:     h.Node,
-				source:   h.Query,
+				source:   source,
 				peers:    []netip.AddrPort{h.Peer},
 			}:
 			}

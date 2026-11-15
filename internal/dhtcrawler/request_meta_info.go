@@ -72,6 +72,7 @@ func (c *crawler) doRequestMetaInfo(
 		res    metainforequester.Response
 		err    error
 		silent bool
+		addr   netip.AddrPort
 	}
 
 	dialCtx, cancel := context.WithCancel(ctx)
@@ -88,17 +89,19 @@ func (c *crawler) doRequestMetaInfo(
 	for _, p := range peers {
 		go func() {
 			cand := candidate{addr: p, prev: "new", ping: "ok"}
+			pingSource := "peer_ping" + c.family(p.Addr()).suffix
+
 			if c.deadPeers.test(peerKey(p)) {
 				cand.prev = "dead"
 			}
 
 			if alive, cached := c.pingCache.get(p); cached {
 				if alive {
-					c.countHash("peer_ping", "cached_ok", 1)
+					c.countHash(pingSource, "cached_ok", 1)
 				} else {
 					cand.ping = "fail"
 
-					c.countHash("peer_ping", "cached_fail", 1)
+					c.countHash(pingSource, "cached_fail", 1)
 				}
 
 				probed <- cand
@@ -114,16 +117,16 @@ func (c *crawler) doRequestMetaInfo(
 			switch {
 			case pingErr == nil:
 				c.pingCache.put(p, true)
-				c.countHash("peer_ping", "sent_ok", 1)
+				c.countHash(pingSource, "sent_ok", 1)
 			case errors.Is(pingErr, server.ErrLimited):
 				cand.ping = "fail"
 
-				c.countHash("peer_ping", "limited", 1)
+				c.countHash(pingSource, "limited", 1)
 			default:
 				cand.ping = "fail"
 
 				c.pingCache.put(p, false)
-				c.countHash("peer_ping", "sent_fail", 1)
+				c.countHash(pingSource, "sent_fail", 1)
 			}
 
 			probed <- cand
@@ -183,7 +186,7 @@ func (c *crawler) doRequestMetaInfo(
 					c.probeTotal.With(prometheus.Labels{"prev": cand.prev, "ping": cand.ping, "dial": outcome}).Inc()
 				}
 
-				results <- dialResult{res: res, err: err, silent: cand.ping != "ok"}
+				results <- dialResult{res: res, err: err, silent: cand.ping != "ok", addr: cand.addr}
 			}()
 		}
 
@@ -218,6 +221,10 @@ func (c *crawler) doRequestMetaInfo(
 			_ = c.blockingManager.Block(ctx, []protocol.ID{hash}, false)
 
 			return metainforequester.Response{}, errors.Join(errBanned, banErr)
+		}
+
+		if c.family(r.addr.Addr()) == c.v6 {
+			c.countHash(source, stageMetaInfoOK+"6", 1)
 		}
 
 		return r.res, nil

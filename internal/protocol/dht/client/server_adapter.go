@@ -15,6 +15,18 @@ type serverAdapter struct {
 	server server.Server
 }
 
+func (a serverAdapter) IPv6() bool {
+	return a.server.IPv6()
+}
+
+func (a serverAdapter) want() []dht.Want {
+	if !a.server.IPv6() {
+		return nil
+	}
+
+	return []dht.Want{dht.WantNodes, dht.WantNodes6}
+}
+
 func (a serverAdapter) Ping(ctx context.Context, addr netip.AddrPort) (PingResult, error) {
 	res, err := a.server.Query(ctx, addr, dht.QPing, dht.MsgArgs{ID: a.nodeID})
 	if err != nil {
@@ -29,14 +41,14 @@ func (a serverAdapter) FindNode(
 	addr netip.AddrPort,
 	target protocol.ID,
 ) (FindNodeResult, error) {
-	res, err := a.server.Query(ctx, addr, dht.QFindNode, dht.MsgArgs{ID: a.nodeID, Target: target})
+	res, err := a.server.Query(ctx, addr, dht.QFindNode, dht.MsgArgs{ID: a.nodeID, Target: target, Want: a.want()})
 	if err != nil {
 		return FindNodeResult{}, err
 	}
 
 	return FindNodeResult{
 		ID:    res.Msg.R.ID,
-		Nodes: extractNodes(res.Msg),
+		Nodes: a.extractNodes(res.Msg),
 	}, nil
 }
 
@@ -45,7 +57,8 @@ func (a serverAdapter) GetPeers(
 	addr netip.AddrPort,
 	infoHash protocol.ID,
 ) (GetPeersResult, error) {
-	res, err := a.server.Query(ctx, addr, dht.QGetPeers, dht.MsgArgs{ID: a.nodeID, InfoHash: infoHash})
+	res, err := a.server.Query(
+		ctx, addr, dht.QGetPeers, dht.MsgArgs{ID: a.nodeID, InfoHash: infoHash, Want: a.want()})
 	if err != nil {
 		return GetPeersResult{}, err
 	}
@@ -53,7 +66,7 @@ func (a serverAdapter) GetPeers(
 	return GetPeersResult{
 		ID:     res.Msg.R.ID,
 		Values: extractValues(res.Msg),
-		Nodes:  extractNodes(res.Msg),
+		Nodes:  a.extractNodes(res.Msg),
 	}, nil
 }
 
@@ -62,7 +75,8 @@ func (a serverAdapter) GetPeersScrape(
 	addr netip.AddrPort,
 	infoHash protocol.ID,
 ) (GetPeersScrapeResult, error) {
-	res, err := a.server.Query(ctx, addr, dht.QGetPeers, dht.MsgArgs{ID: a.nodeID, InfoHash: infoHash, Scrape: 1})
+	res, err := a.server.Query(
+		ctx, addr, dht.QGetPeers, dht.MsgArgs{ID: a.nodeID, InfoHash: infoHash, Scrape: 1, Want: a.want()})
 	if err != nil {
 		return GetPeersScrapeResult{}, err
 	}
@@ -74,7 +88,7 @@ func (a serverAdapter) GetPeersScrape(
 	return GetPeersScrapeResult{
 		ID:        res.Msg.R.ID,
 		Values:    extractValues(res.Msg),
-		Nodes:     extractNodes(res.Msg),
+		Nodes:     a.extractNodes(res.Msg),
 		BfPeers:   *res.Msg.R.BFpe.ToBloomFilter(),
 		BfSeeders: *res.Msg.R.BFsd.ToBloomFilter(),
 	}, nil
@@ -85,7 +99,8 @@ func (a serverAdapter) SampleInfoHashes(
 	addr netip.AddrPort,
 	target protocol.ID,
 ) (SampleInfoHashesResult, error) {
-	res, err := a.server.Query(ctx, addr, dht.QSampleInfohashes, dht.MsgArgs{ID: a.nodeID, Target: target})
+	res, err := a.server.Query(
+		ctx, addr, dht.QSampleInfohashes, dht.MsgArgs{ID: a.nodeID, Target: target, Want: a.want()})
 	if err != nil {
 		return SampleInfoHashesResult{}, err
 	}
@@ -112,20 +127,33 @@ func (a serverAdapter) SampleInfoHashes(
 	return SampleInfoHashesResult{
 		ID:       res.Msg.R.ID,
 		Samples:  samples,
-		Nodes:    extractNodes(res.Msg),
+		Nodes:    a.extractNodes(res.Msg),
 		Num:      totalNum,
 		Interval: interval,
 	}, nil
 }
 
-func extractNodes(msg dht.Msg) []NodeInfo {
-	if len(msg.R.Nodes) == 0 {
+func (a serverAdapter) extractNodes(msg dht.Msg) []NodeInfo {
+	nodes6 := msg.R.Nodes6
+	if !a.server.IPv6() {
+		nodes6 = nil
+	}
+
+	if len(msg.R.Nodes) == 0 && len(nodes6) == 0 {
 		return nil
 	}
 
-	nodes := make([]NodeInfo, 0, len(msg.R.Nodes))
+	nodes := make([]NodeInfo, 0, len(msg.R.Nodes)+len(nodes6))
 	for _, n := range msg.R.Nodes {
 		nodes = append(nodes, NodeInfo{ID: n.ID, Addr: n.Addr.ToAddrPort()})
+	}
+
+	for _, n := range nodes6 {
+		addr := n.Addr.ToAddrPort()
+		ip := addr.Addr()
+		if dht.IsIPv6(ip) && ip.IsGlobalUnicast() && !ip.IsPrivate() && addr.Port() != 0 {
+			nodes = append(nodes, NodeInfo{ID: n.ID, Addr: addr})
+		}
 	}
 
 	return nodes

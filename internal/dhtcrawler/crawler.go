@@ -23,7 +23,8 @@ import (
 )
 
 type crawler struct {
-	kTable                       ktable.Table
+	v4                           *nodeFamily
+	v6                           *nodeFamily
 	client                       client.Client
 	metainfoRequester            metainforequester.Requester
 	banningChecker               banning.Checker
@@ -41,15 +42,11 @@ type crawler struct {
 	probeTotal                   *prometheus.CounterVec
 	lookupQueries                *prometheus.HistogramVec
 	deadPeers                    *ignoreFilter
-	nodePool                     *nodePool
 	pingCache                    *pingCache
 	trackers                     *trackerScraper
 	trackers6                    *trackerScraper
 	fetched                      *ignoreFilter
 	failed                       *failedHashes
-	nodesForPing                 concurrency.BufferedConcurrentChannel[ktable.Node]
-	nodesForFindNode             concurrency.BufferedConcurrentChannel[ktable.Node]
-	nodesForSampleInfoHashes     concurrency.BufferedConcurrentChannel[ktable.Node]
 	infoHashTriage               concurrency.BatchingChannel[nodeHasPeersForHash]
 	getPeers                     concurrency.BufferedConcurrentChannel[nodeHasPeersForHash]
 	lookups                      concurrency.BufferedConcurrentChannel[lookupRequest]
@@ -67,8 +64,6 @@ type crawler struct {
 	// This avoids multiple attempts to crawl the same hash, and takes a lot of load off the database query
 	// that checks if a hash has already been indexed.
 	ignoreHashes    *ignoreFilter
-	ignoreNodes     *ignoreFilter
-	sampledNodes    *ignoreFilter
 	blockingManager blocking.Manager
 	// soughtNodeID is a random node ID used as the target for find_node and sample_infohashes requests.
 	// It is rotated every 10 seconds.
@@ -84,11 +79,21 @@ func (c *crawler) start() {
 	// start the various pipeline workers
 	go c.rotateSoughtNodeID(ctx)
 	go c.runDiscoveredNodes(ctx)
-	go c.runPing(ctx)
-	go c.runFindNode(ctx)
-	go c.getNodesForFindNode(ctx)
-	go c.runSampleInfoHashes(ctx)
-	go c.getNodesForSampleInfoHashes(ctx)
+
+	for _, f := range c.families() {
+		go c.runPing(ctx, f)
+		go c.runFindNode(ctx, f)
+		go c.getNodesForFindNode(ctx, f)
+		go c.runSampleInfoHashes(ctx, f)
+		go c.getNodesForSampleInfoHashes(ctx, f)
+		go c.getOldNodes(ctx, f)
+		go c.runNodePool(ctx, f)
+	}
+
+	if c.v6 != nil {
+		go c.runDiscoveredNodes6(ctx)
+	}
+
 	go c.runInfoHashTriage(ctx, "triage", c.infoHashTriage)
 	go c.runInfoHashTriage(ctx, "triage_inbound", c.inboundTriage)
 	go c.runInboundHashes(ctx)
@@ -96,7 +101,6 @@ func (c *crawler) start() {
 	go c.runLookups(ctx, c.lookups)
 	go c.runLookups(ctx, c.lookupsInbound)
 	go c.reportStages(ctx)
-	go c.runNodePool(ctx)
 	go c.saveFailedHashes(ctx)
 	if c.trackers != nil {
 		c.trackers.onPeers = c.trackerPeers
@@ -113,7 +117,6 @@ func (c *crawler) start() {
 	go c.reseedBootstrapNodes(ctx)
 	go c.runPersistTorrents(ctx)
 	go c.runPersistSources(ctx)
-	go c.getOldNodes(ctx)
 	<-c.stopped
 }
 
@@ -125,6 +128,8 @@ type nodeHasPeersForHash struct {
 }
 
 const (
+	sourceSample6       = "sample_infohashes6"
+	sourceSampleLookup6 = "sample_infohashes6_lookup"
 	sourceSampleLookup  = "sample_infohashes_lookup"
 	stageLookupFound    = "lookup_found"
 	stageLookupEmpty    = "lookup_empty"

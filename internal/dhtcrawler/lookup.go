@@ -55,15 +55,50 @@ func xorDistance(a protocol.ID, b protocol.ID) (d protocol.ID) {
 	return
 }
 
+var lookupIPv6 = os.Getenv("BITMAGNET_LOOKUP_IPV6") != "off"
+
+// lookupPeers runs one lookup per address family side by side: a node only knows peers of its own family.
 func (c *crawler) lookupPeers(
 	ctx context.Context,
 	source string,
 	hash protocol.ID,
 	seeds []client.NodeInfo,
 ) []netip.AddrPort {
+	if c.v6 == nil || !lookupIPv6 {
+		return c.lookupFamilyPeers(ctx, c.v4, source, hash, seeds)
+	}
+
+	found6 := make(chan []netip.AddrPort, 1)
+
+	go func() {
+		found6 <- c.lookupFamilyPeers(ctx, c.v6, source, hash, seeds)
+	}()
+
+	peers := c.lookupFamilyPeers(ctx, c.v4, source, hash, seeds)
+	peers6 := <-found6
+
+	if len(peers6) > 0 {
+		c.countHash(source, stageLookupFound+"6", 1)
+		c.countHash(source, stagePeersSum+"6", len(peers6))
+
+		if len(peers) == 0 {
+			c.countHash(source, stageLookupFound+"6_only", 1)
+		}
+	}
+
+	return append(peers, peers6...)
+}
+
+func (c *crawler) lookupFamilyPeers(
+	ctx context.Context,
+	f *nodeFamily,
+	source string,
+	hash protocol.ID,
+	seeds []client.NodeInfo,
+) []netip.AddrPort {
 	candidates := make(map[netip.AddrPort]*lookupNode)
 	add := func(id protocol.ID, addr netip.AddrPort) {
-		if !addr.IsValid() || addr.Port() == 0 {
+		if !addr.IsValid() || addr.Port() == 0 || c.family(addr.Addr()) != f {
 			return
 		}
 
@@ -76,11 +111,11 @@ func (c *crawler) lookupPeers(
 		add(n.ID, n.Addr)
 	}
 
-	for _, n := range c.nodePool.closest(hash, lookupPoolSeeds) {
+	for _, n := range f.nodePool.closest(hash, lookupPoolSeeds) {
 		add(n.ID, n.Addr)
 	}
 
-	for _, n := range c.kTable.GetClosestNodes(hash) {
+	for _, n := range f.kTable.GetClosestNodes(hash) {
 		add(n.ID(), n.Addr())
 	}
 
@@ -158,7 +193,7 @@ func (c *crawler) lookupPeers(
 
 		if r.ok {
 			responded = append(responded, r.node.distance)
-			c.nodePool.add(r.res.ID, r.node.addr)
+			f.nodePool.add(r.res.ID, r.node.addr)
 
 			for _, v := range r.res.Values {
 				if len(peers) < lookupMaxPeers {
@@ -185,13 +220,15 @@ func (c *crawler) lookupPeers(
 		}
 	}
 
-	c.countHash(source, stageLookupQueries, queries)
-	c.countHash(source, "lookup_limited", limited)
+	c.countHash(source, stageLookupQueries+f.suffix, queries)
+	c.countHash(source, "lookup_limited"+f.suffix, limited)
 
 	if len(peers) > 0 {
-		c.lookupQueries.With(prometheus.Labels{"source": source, "result": "found"}).Observe(float64(firstPeersAt))
+		c.lookupQueries.With(prometheus.Labels{"source": source, "result": "found" + f.suffix}).
+			Observe(float64(firstPeersAt))
 	} else {
-		c.lookupQueries.With(prometheus.Labels{"source": source, "result": "empty"}).Observe(float64(completed))
+		c.lookupQueries.With(prometheus.Labels{"source": source, "result": "empty" + f.suffix}).
+			Observe(float64(completed))
 	}
 
 	result := make([]netip.AddrPort, 0, len(peers))

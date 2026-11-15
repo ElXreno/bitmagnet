@@ -14,8 +14,7 @@ type socket struct {
 }
 
 func newSocket() Socket {
-	fd, _ := windows.Socket(windows.AF_INET, windows.SOCK_DGRAM, 0)
-	return &socket{fd: fd}
+	return &socket{fd: windows.InvalidHandle}
 }
 
 func (s *socket) Open(localAddr netip.AddrPort) error {
@@ -23,10 +22,32 @@ func (s *socket) Open(localAddr netip.AddrPort) error {
 	if addrErr != nil {
 		return addrErr
 	}
-	return windows.Bind(s.fd, sAddr)
+	family := windows.AF_INET
+	if localAddr.Addr().Is6() {
+		family = windows.AF_INET6
+	}
+	fd, sockErr := windows.Socket(family, windows.SOCK_DGRAM, 0)
+	if sockErr != nil {
+		return fmt.Errorf("error creating socket: %w", sockErr)
+	}
+	if family == windows.AF_INET6 {
+		if optErr := windows.SetsockoptInt(fd, windows.IPPROTO_IPV6, windows.IPV6_V6ONLY, 1); optErr != nil {
+			_ = windows.Close(fd)
+			return fmt.Errorf("error setting IPV6_V6ONLY: %w", optErr)
+		}
+	}
+	if bindErr := windows.Bind(fd, sAddr); bindErr != nil {
+		_ = windows.Close(fd)
+		return bindErr
+	}
+	s.fd = fd
+	return nil
 }
 
 func (s *socket) Close() error {
+	if s.fd == windows.InvalidHandle {
+		return nil
+	}
 	return windows.Close(s.fd)
 }
 

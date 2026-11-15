@@ -42,6 +42,30 @@ const (
 	subsystem = "dht_server"
 )
 
+func newBaseServer(p Params) *server {
+	s := &server{
+		stopped: make(chan struct{}),
+		localAddr: netip.AddrPortFrom(
+			netip.IPv4Unspecified(),
+			p.Config.Port,
+		),
+		socket:           NewSocket(),
+		queries:          make(map[string]chan dht.RecvMsg),
+		queryTimeout:     p.Config.QueryTimeout,
+		responder:        p.Responder,
+		responderTimeout: time.Second * 5,
+		idIssuer:         &variantIDIssuer{},
+		logger:           p.Logger.Named(subsystem),
+	}
+
+	if dht.IPv6Enabled() {
+		s.localAddr6 = netip.AddrPortFrom(netip.IPv6Unspecified(), p.Config.Port)
+		s.socket6 = NewSocket()
+	}
+
+	return s
+}
+
 func New(p Params) Result {
 	lastResponses := &concurrency.AtomicValue[LastResponses]{}
 	collector := newPrometheusCollector()
@@ -50,20 +74,7 @@ func New(p Params) Result {
 			server: prometheusServerWrapper{
 				prometheusCollector: collector,
 				server: healthCollector{
-					baseServer: &server{
-						stopped: make(chan struct{}),
-						localAddr: netip.AddrPortFrom(
-							netip.IPv4Unspecified(),
-							p.Config.Port,
-						),
-						socket:           NewSocket(),
-						queries:          make(map[string]chan dht.RecvMsg),
-						queryTimeout:     p.Config.QueryTimeout,
-						responder:        p.Responder,
-						responderTimeout: time.Second * 5,
-						idIssuer:         &variantIDIssuer{},
-						logger:           p.Logger.Named(subsystem),
-					},
+					baseServer:    newBaseServer(p),
 					lastResponses: lastResponses,
 				},
 			},

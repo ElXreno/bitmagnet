@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/concurrency"
-	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
 )
@@ -17,7 +16,7 @@ var errNoPeers = errors.New("no peers found")
 
 func (c *crawler) runGetPeers(ctx context.Context) {
 	_ = c.getPeers.Run(ctx, func(req nodeHasPeersForHash) {
-		if req.source != sourceSample {
+		if !isSampleSource(req.source) {
 			select {
 			case <-ctx.Done():
 			case c.lookupsInbound.In() <- lookupRequest{nodeHasPeersForHash: req}:
@@ -42,7 +41,7 @@ func (c *crawler) runGetPeers(ctx context.Context) {
 				return
 			}
 
-			req.source = sourceSampleLookup
+			req.source = sampleLookupSource(req.source)
 
 			select {
 			case c.lookups.In() <- lookupRequest{nodeHasPeersForHash: req, seeds: nodes}:
@@ -76,7 +75,7 @@ func (c *crawler) runLookups(ctx context.Context, ch concurrency.BufferedConcurr
 		}
 
 		var peers []netip.AddrPort
-		if req.source == dht.QAnnouncePeer {
+		if isAnnounceSource(req.source) {
 			peers = append(append(peers, req.peers...), found...)
 		} else {
 			peers = append(append(peers, found...), req.peers...)
@@ -94,16 +93,20 @@ func (c *crawler) runLookups(ctx context.Context, ch concurrency.BufferedConcurr
 }
 
 func (c *crawler) forwardPeers(ctx context.Context, req nodeHasPeersForHash, peers []netip.AddrPort) {
-	hashPeers := make([]ktable.HashPeer, 0, len(peers))
+	hashPeers := make(map[*nodeFamily][]ktable.HashPeer, 2)
+
 	for _, p := range peers {
-		hashPeers = append(hashPeers, ktable.HashPeer{
+		f := c.family(p.Addr())
+		hashPeers[f] = append(hashPeers[f], ktable.HashPeer{
 			Addr: p,
 		})
 	}
 
-	c.kTable.BatchCommand(
-		ktable.PutHash{ID: req.infoHash, Peers: hashPeers},
-	)
+	for f, familyPeers := range hashPeers {
+		f.kTable.BatchCommand(
+			ktable.PutHash{ID: req.infoHash, Peers: familyPeers},
+		)
+	}
 
 	select {
 	case <-ctx.Done():
@@ -118,9 +121,11 @@ func (c *crawler) requestPeersForHash(
 	ctx context.Context,
 	req nodeHasPeersForHash,
 ) (infoHashWithPeers, []client.NodeInfo, error) {
+	kTable := c.family(req.node.Addr()).kTable
+
 	res, err := c.client.GetPeers(ctx, req.node, req.infoHash)
 	if err != nil {
-		c.kTable.BatchCommand(ktable.DropAddr{
+		kTable.BatchCommand(ktable.DropAddr{
 			Addr:   req.node.Addr(),
 			Reason: fmt.Errorf("failed to get peers: %w", err),
 		})
@@ -128,7 +133,7 @@ func (c *crawler) requestPeersForHash(
 		return infoHashWithPeers{}, nil, err
 	}
 
-	c.kTable.BatchCommand(ktable.PutNode{
+	kTable.BatchCommand(ktable.PutNode{
 		ID:      res.ID,
 		Addr:    req.node,
 		Options: []ktable.NodeOption{ktable.NodeResponded()},

@@ -14,14 +14,17 @@ func (c *crawler) reportStages(ctx context.Context) {
 	}
 
 	stages := map[string]stage{
-		"ping":              c.nodesForPing,
-		"find_node":         c.nodesForFindNode,
-		"sample_infohashes": c.nodesForSampleInfoHashes,
 		"get_peers":         c.getPeers,
 		"lookups":           c.lookups,
 		"lookups_inbound":   c.lookupsInbound,
 		"scrape":            c.scrape,
 		"request_meta_info": c.requestMetaInfo,
+	}
+
+	for _, f := range c.families() {
+		stages["ping"+f.suffix] = f.nodesForPing
+		stages["find_node"+f.suffix] = f.nodesForFindNode
+		stages["sample_infohashes"+f.suffix] = f.nodesForSampleInfoHashes
 	}
 
 	for {
@@ -36,6 +39,11 @@ func (c *crawler) reportStages(ctx context.Context) {
 
 			c.stageGauge.With(prometheus.Labels{"stage": "inbound_hashes", "kind": "queued"}).
 				Set(float64(len(c.inboundHashes)))
+
+			if c.v6 != nil {
+				c.stageGauge.With(prometheus.Labels{"stage": "discovered_nodes6", "kind": "queued"}).
+					Set(float64(len(c.v6.discovered)))
+			}
 		}
 	}
 }

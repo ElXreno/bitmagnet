@@ -9,14 +9,14 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
 )
 
-func (c *crawler) getNodesForSampleInfoHashes(ctx context.Context) {
+func (c *crawler) getNodesForSampleInfoHashes(ctx context.Context, f *nodeFamily) {
 	for {
-		peers := c.kTable.GetNodesForSampleInfoHashes(240)
+		peers := f.kTable.GetNodesForSampleInfoHashes(240)
 		for _, p := range peers {
 			select {
 			case <-ctx.Done():
 				return
-			case c.nodesForSampleInfoHashes.In() <- p:
+			case f.nodesForSampleInfoHashes.In() <- p:
 				continue
 			}
 		}
@@ -25,15 +25,17 @@ func (c *crawler) getNodesForSampleInfoHashes(ctx context.Context) {
 	}
 }
 
-func (c *crawler) runSampleInfoHashes(ctx context.Context) {
-	_ = c.nodesForSampleInfoHashes.Run(ctx, func(n ktable.Node) {
+func (c *crawler) runSampleInfoHashes(ctx context.Context, f *nodeFamily) {
+	source := f.sourceSample()
+
+	_ = f.nodesForSampleInfoHashes.Run(ctx, func(n ktable.Node) {
 		if !n.IsSampleInfoHashesCandidate() {
 			return
 		}
 
 		res, err := c.client.SampleInfoHashes(ctx, n.Addr(), c.soughtNodeID.Get())
 		if err != nil {
-			c.kTable.BatchCommand(
+			f.kTable.BatchCommand(
 				ktable.DropNode{ID: n.ID(), Reason: fmt.Errorf("sample_infohashes failed: %w", err)},
 			)
 
@@ -47,14 +49,14 @@ func (c *crawler) runSampleInfoHashes(ctx context.Context) {
 				discoveredHashes = append(discoveredHashes, nodeHasPeersForHash{
 					infoHash: s,
 					node:     n.Addr(),
-					source:   sourceSample,
+					source:   source,
 				})
 			}
 		}
 
-		c.countSampledNode(n.ID(), res.Num, res.Interval, len(res.Samples), len(discoveredHashes))
-		c.countHash(sourceSample, stageDiscovered, len(discoveredHashes))
-		c.countHash(sourceSample, stageDuplicate, len(res.Samples)-len(discoveredHashes))
+		c.countSampledNode(f, n.ID(), res.Num, res.Interval, len(res.Samples), len(discoveredHashes))
+		c.countHash(source, stageDiscovered, len(discoveredHashes))
+		c.countHash(source, stageDuplicate, len(res.Samples)-len(discoveredHashes))
 
 		for _, h := range discoveredHashes {
 			select {
@@ -72,7 +74,7 @@ func (c *crawler) runSampleInfoHashes(ctx context.Context) {
 			interval = 60
 		}
 
-		c.kTable.BatchCommand(ktable.PutNode{ID: n.ID(), Addr: n.Addr(), Options: []ktable.NodeOption{
+		f.kTable.BatchCommand(ktable.PutNode{ID: n.ID(), Addr: n.Addr(), Options: []ktable.NodeOption{
 			ktable.NodeResponded(),
 			ktable.NodeBep51Support(true),
 			ktable.NodeSampleInfoHashesRes(
@@ -104,13 +106,15 @@ func (c *crawler) runSampleInfoHashes(ctx context.Context) {
 
 // countSampledNode records how wide and how deep sampling reaches: whether the node was seen before in this
 // run, how many info hashes it says it stores and how many new ones the visit produced.
-func (c *crawler) countSampledNode(id protocol.ID, stored int, interval int, samples int, fresh int) {
+func (c *crawler) countSampledNode(
+	f *nodeFamily, id protocol.ID, stored int, interval int, samples int, fresh int,
+) {
 	visit := "first"
-	if c.sampledNodes.testAndAdd(id) {
+	if f.sampledNodes.testAndAdd(id) {
 		visit = "repeat"
 	}
 
-	const source = "sample_nodes"
+	source := "sample_nodes" + f.suffix
 
 	c.countHash(source, visit, 1)
 	c.countHash(source, "new_from_"+visit, fresh)

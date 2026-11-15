@@ -76,11 +76,38 @@ func (c *crawler) doRequestMetaInfo(
 				cand.prev = "dead"
 			}
 
+			if alive, cached := c.pingCache.get(p); cached {
+				if alive {
+					c.countHash("peer_ping", "cached_ok", 1)
+				} else {
+					cand.ping = "fail"
+
+					c.countHash("peer_ping", "cached_fail", 1)
+				}
+
+				probed <- cand
+
+				return
+			}
+
 			pingCtx, pingCancel := context.WithTimeout(server.WithMaxLimiterWait(ctx, lookupMaxLimiterWait), peerProbeTimeout)
 			defer pingCancel()
 
-			if _, pingErr := c.client.Ping(pingCtx, p); pingErr != nil {
+			_, pingErr := c.client.Ping(pingCtx, p)
+
+			switch {
+			case pingErr == nil:
+				c.pingCache.put(p, true)
+				c.countHash("peer_ping", "sent_ok", 1)
+			case errors.Is(pingErr, server.ErrLimited):
 				cand.ping = "fail"
+
+				c.countHash("peer_ping", "limited", 1)
+			default:
+				cand.ping = "fail"
+
+				c.pingCache.put(p, false)
+				c.countHash("peer_ping", "sent_fail", 1)
 			}
 
 			probed <- cand

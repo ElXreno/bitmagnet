@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
@@ -51,6 +52,8 @@ func newTestCrawler(alive map[netip.AddrPort]bool, good map[netip.AddrPort]bool)
 		metainfoRequester: fakeRequester{good: good},
 		banningChecker:    allowAll{},
 		deadPeers:         &ignoreFilter{bloom: boom.NewStableBloomFilter(1000, 2, 0.001)},
+		pingCache:         newPingCache(time.Minute),
+		hashesTotal:       prometheus.NewCounterVec(prometheus.CounterOpts{Name: "hashes"}, []string{"source", "stage"}),
 		probeTotal:        prometheus.NewCounterVec(prometheus.CounterOpts{Name: "probe"}, []string{"prev", "ping", "dial"}),
 		dialsTotal:        prometheus.NewCounterVec(prometheus.CounterOpts{Name: "dials"}, []string{"source", "result"}),
 	}
@@ -110,5 +113,29 @@ func TestCreateTorrentModelRefusesEmptyMetaInfo(t *testing.T) {
 
 	if _, err := createTorrentModel(protocol.ID{1}, metainfo.Info{}, false, 100); err == nil {
 		t.Fatal("an empty meta info must not become a torrent row")
+	}
+}
+
+func TestPingCacheServesRepeatedAddresses(t *testing.T) {
+	t.Parallel()
+
+	addr := netip.MustParseAddrPort("192.0.2.1:6881")
+	cache := newPingCache(time.Minute)
+
+	if _, cached := cache.get(addr); cached {
+		t.Fatal("an unseen address must not be cached")
+	}
+
+	cache.put(addr, true)
+
+	if alive, cached := cache.get(addr); !cached || !alive {
+		t.Fatal("want a cached positive answer")
+	}
+
+	off := newPingCache(0)
+	off.put(addr, true)
+
+	if _, cached := off.get(addr); cached {
+		t.Fatal("a disabled cache must stay empty")
 	}
 }

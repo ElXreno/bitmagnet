@@ -10,6 +10,7 @@ import (
 	"math"
 	"net"
 	"net/netip"
+	"os"
 	"syscall"
 	"time"
 
@@ -202,6 +203,8 @@ func (r requester) connect(ctx context.Context, addr netip.AddrPort) (conn *net.
 	return tcpConn, nil
 }
 
+var pipelinedHandshake = os.Getenv("BITMAGNET_PIPELINED_HANDSHAKE") == "1"
+
 const extendedHandshake = "\x00\x00\x00\x1a\x14\x00d1:md11:ut_metadatai1eee"
 
 var myExBits = NewPeerExtensionBits(ExtensionBitDht, ExtensionBitLtep)
@@ -212,7 +215,9 @@ func btHandshake(rw io.ReadWriter, infoHash protocol.ID, clientID protocol.ID) (
 	handshakeBytes = append(handshakeBytes, myExBits[:]...)
 	handshakeBytes = append(handshakeBytes, infoHash[:]...)
 	handshakeBytes = append(handshakeBytes, clientID[:]...)
-	handshakeBytes = append(handshakeBytes, extendedHandshake...)
+	if pipelinedHandshake {
+		handshakeBytes = append(handshakeBytes, extendedHandshake...)
+	}
 
 	if n, hsErr := rw.Write(handshakeBytes); hsErr != nil {
 		return HandshakeInfo{}, hsErr
@@ -273,6 +278,13 @@ type extDict struct {
 const maxMetadataSize = 10 * 1024 * 1024
 
 func exHandshake(rw io.ReadWriter) (metadataSize uint, utMetadata uint8, err error) {
+	if !pipelinedHandshake {
+		if _, writeErr := rw.Write([]byte(extendedHandshake)); writeErr != nil {
+			err = writeErr
+			return
+		}
+	}
+
 	rExMessage, readErr := readExMessage(rw)
 	if readErr != nil {
 		err = readErr

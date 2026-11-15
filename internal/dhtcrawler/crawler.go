@@ -42,6 +42,7 @@ type crawler struct {
 	lookupQueries                *prometheus.HistogramVec
 	deadPeers                    *ignoreFilter
 	nodePool                     *nodePool
+	pingCache                    *pingCache
 	nodesForPing                 concurrency.BufferedConcurrentChannel[ktable.Node]
 	nodesForFindNode             concurrency.BufferedConcurrentChannel[ktable.Node]
 	nodesForSampleInfoHashes     concurrency.BufferedConcurrentChannel[ktable.Node]

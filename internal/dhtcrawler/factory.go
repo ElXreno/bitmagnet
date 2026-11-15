@@ -135,6 +135,8 @@ func New(params Params) Result {
 						probeTotal:    probeTotal,
 						lookupQueries: lookupQueries,
 						nodePool:      newNodePool(),
+						pingCache: newPingCache(
+							time.Duration(envInt("BITMAGNET_PING_CACHE_SECONDS", 300)) * time.Second),
 						deadPeers: &ignoreFilter{
 							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
 						},

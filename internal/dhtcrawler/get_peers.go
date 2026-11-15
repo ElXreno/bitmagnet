@@ -34,6 +34,13 @@ func (c *crawler) runGetPeers(ctx context.Context) {
 				c.countHash(req.source, stageGetPeersError, 1)
 			}
 
+			if c.unseeded(req.infoHash) {
+				c.countHash(req.source, "lookup_skipped", 1)
+				c.trackerOutcome(req.infoHash, "lookup_skipped")
+
+				return
+			}
+
 			req.source = sourceSampleLookup
 
 			select {

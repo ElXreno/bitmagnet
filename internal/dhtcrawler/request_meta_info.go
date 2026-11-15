@@ -118,6 +118,7 @@ func (c *crawler) doRequestMetaInfo(
 		}()
 	}
 
+	skipSilent := trackerPolicy != "lookup" && c.unseeded(hash)
 	candidates := make([]candidate, 0, len(peers))
 
 	var unanswered []candidate
@@ -130,6 +131,8 @@ func (c *crawler) doRequestMetaInfo(
 			candidates = append(candidates, cand)
 		case cand.prev == "dead":
 			c.probeTotal.With(prometheus.Labels{"prev": cand.prev, "ping": cand.ping, "dial": "skipped_dead"}).Inc()
+		case skipSilent:
+			c.probeTotal.With(prometheus.Labels{"prev": cand.prev, "ping": cand.ping, "dial": "skipped_unseeded"}).Inc()
 		default:
 			unanswered = append(unanswered, cand)
 		}

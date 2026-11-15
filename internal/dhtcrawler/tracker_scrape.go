@@ -26,7 +26,6 @@ var defaultTrackers = []string{
 	"tracker.opentrackr.org:1337",
 	"open.stealth.si:80",
 	"tracker.torrent.eu.org:451",
-	"exodus.desync.com:6969",
 }
 
 type trackerMetrics struct {
@@ -226,4 +225,18 @@ func (c *crawler) trackerOutcome(hash protocol.ID, outcome string) {
 	}
 
 	c.trackers.metrics.outcome.With(prometheus.Labels{"swarm": c.trackers.swarm(hash), "outcome": outcome}).Inc()
+}
+
+// trackerPolicy selects where a hash without seeders on any tracker gets less effort:
+// "off" nowhere, "lookup" no iterative lookup, anything else also no dials to peers that ignored the ping.
+var trackerPolicy = os.Getenv("BITMAGNET_TRACKER_POLICY")
+
+func (c *crawler) unseeded(hash protocol.ID) bool {
+	if c.trackers == nil || trackerPolicy == "off" {
+		return false
+	}
+
+	swarm := c.trackers.swarm(hash)
+
+	return swarm == "leechers" || swarm == "unknown"
 }

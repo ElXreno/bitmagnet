@@ -1156,6 +1156,8 @@ func TestInboundSwitchAndTrackerMembership(t *testing.T) {
 	t.Setenv("BITMAGNET_INBOUND_LATE_HASHES", "")
 	t.Setenv("BITMAGNET_INBOUND_LATE_SECONDS", "")
 	t.Setenv("BITMAGNET_INBOUND_MAX_CONNS_PER_IP", "")
+	t.Setenv("BITMAGNET_INBOUND_EXTRA_MIN_SEEDERS", "")
+	t.Setenv("BITMAGNET_INBOUND_EXTRA_TRACKERS", "")
 
 	receiver := metainforequester.NewReceiver(protocol.RandomPeerID(), 2*time.Second)
 	metadata, hash := inboundMetadata(t, "held")
@@ -1273,6 +1275,7 @@ func TestInboundSwitchAndTrackerMembership(t *testing.T) {
 
 	if got := c.inbound.config; got != (inboundConfig{
 		maxHashes: 60, hold: time.Second, maxConns: 3, maxPerIP: 8, lateMax: 50_000, lateTTL: 15 * time.Minute,
+		extraMin: 2, extraMax: 3,
 	}) {
 		t.Fatalf("want room for two trackers announcing 30 hashes a second for the hold of one second, got %+v", got)
 	}
@@ -1433,5 +1436,185 @@ func BenchmarkInboundJoinWhenFull(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+func TestExtraMembershipsUseIdleTokens(t *testing.T) {
+	t.Parallel()
+
+	config := inboundConfig{maxHashes: 10, hold: time.Minute, maxConns: 4, extraMin: 2, extraMax: 2}
+	s := offlineScraper(4)
+	i := newInboundTest(t, config, s)
+	metadata, strong := inboundMetadata(t, "extra")
+	weak, usual, gone := protocol.ID{1}, protocol.ID{2}, protocol.ID{3}
+
+	for hash, seeders := range map[protocol.ID]uint32{strong: 9, weak: 1, gone: 5} {
+		s.cache.Add(hash, trackerInfo{seeders: seeders, seededBy: 0b1111})
+		i.join(hash, seeders)
+	}
+
+	queued := func() [4]int {
+		return [4]int{len(s.extras[0]), len(s.extras[1]), len(s.extras[2]), len(s.extras[3])}
+	}
+
+	i.inbound.outgoingFailed(sampleRequest(weak))
+
+	if queued() != [4]int{} {
+		t.Fatalf("a hash below the seeder minimum got extra memberships: %v", queued())
+	}
+
+	i.inbound.outgoingFailed(sampleRequest(strong))
+	i.inbound.outgoingFailed(sampleRequest(strong))
+
+	if queued() != [4]int{0, 1, 1, 0} {
+		t.Fatalf("want one extra membership on two other trackers, queued %v", queued())
+	}
+
+	i.inbound.outgoingFailed(sampleRequest(gone))
+
+	if queued() != [4]int{0, 1, 1, 1} && queued() != [4]int{0, 2, 1, 1} {
+		t.Fatalf("want the idlest trackers picked first, queued %v", queued())
+	}
+
+	i.inbound.release(gone, "released_closed_swarm")
+	<-s.stops[0]
+
+	s.announces[1][3] <- usual
+
+	if jobs := s.spendToken(1); len(jobs) != 1 || jobs[0].hash != usual || jobs[0].extra || !jobs[0].hold {
+		t.Fatalf("a waiting normal announce must go before any extra membership, got %+v", jobs)
+	}
+
+	for index := 1; index <= 3; index++ {
+		jobs := s.spendToken(index)
+
+		switch {
+		case index == 3 && len(jobs) != 0:
+			t.Fatalf("an extra for a released hash must be dropped, got %+v", jobs)
+		case index < 3 && (len(jobs) != 1 || jobs[0].hash != strong || !jobs[0].extra || !jobs[0].hold || jobs[0].stop):
+			t.Fatalf("tracker %d: want the extra membership alone, got %+v", index, jobs)
+		}
+	}
+
+	if jobs := s.spendToken(1); len(jobs) != 0 {
+		t.Fatalf("want nothing left on tracker 1, got %+v", jobs)
+	}
+
+	if _, err := (peertest.Peer{InfoHash: strong, Metadata: metadata}).Dial(i.address()); err != nil {
+		t.Fatal(err)
+	}
+
+	i.persisted(t)
+
+	if stops := [4]int{len(s.stops[0]), len(s.stops[1]), len(s.stops[2]), len(s.stops[3])}; stops != [4]int{1, 1, 1, 0} {
+		t.Fatalf("want one stop per membership of the fetched hash, got %v", stops)
+	}
+
+	for stage, want := range map[string]float64{
+		"extra_joined":             1,
+		stageMetaInfoOK:            1,
+		stageMetaInfoOK + "_extra": 1,
+	} {
+		if got := hashCount(t, i.crawler, sourceInboundPeer, stage); got != want {
+			t.Errorf("stage %s: want %v, got %v", stage, want, got)
+		}
+	}
+}
+
+func TestExtraMembershipReachesTheOtherTracker(t *testing.T) {
+	first, firstAnnounces, _ := fakeHoldTracker(t)
+	second, secondAnnounces, _ := fakeHoldTracker(t)
+
+	t.Setenv("BITMAGNET_TRACKERS", first+","+second)
+	t.Setenv("BITMAGNET_TRACKER_ANNOUNCE", "")
+	t.Setenv("BITMAGNET_INBOUND_PEERS", "on")
+	t.Setenv("BITMAGNET_INBOUND_HOLD_SECONDS", "")
+	t.Setenv("BITMAGNET_INBOUND_MAX_HASHES", "")
+	t.Setenv("BITMAGNET_INBOUND_EXTRA_MIN_SEEDERS", "")
+	t.Setenv("BITMAGNET_INBOUND_EXTRA_TRACKERS", "")
+	t.Setenv("BITMAGNET_INBOUND_DHT", "")
+
+	scraper, err := newTrackerScraper(newTrackerMetrics(), "udp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := newTestCrawler(nil, nil)
+	c.logger = zap.NewNop().Sugar()
+	c.fetched = &ignoreFilter{bloom: boom.NewStableBloomFilter(1000, 2, 0.001)}
+	c.trackers = scraper
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	c.setupInboundPeers(metainforequester.NewReceiver(protocol.RandomPeerID(), 2*time.Second), 0)
+
+	go scraper.run(ctx)
+	go c.inbound.run(ctx)
+
+	hash := protocol.ID{9, 1}
+	port := listenerPort(c.inbound.listeners[0])
+
+	next := func(event uint32, from ...chan heldAnnounce) (heldAnnounce, chan heldAnnounce) {
+		t.Helper()
+
+		timeout := time.After(5 * time.Second)
+
+		for {
+			for _, announces := range from {
+				select {
+				case seen := <-announces:
+					if seen.event != event || seen.hash != hash || seen.port != port {
+						t.Fatalf("want event %d from the listener port, got %+v", event, seen)
+					}
+
+					return seen, announces
+				default:
+				}
+			}
+
+			select {
+			case <-timeout:
+				t.Fatalf("no tracker saw event %d", event)
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}
+
+	c.trackers.submit(hash)
+
+	started, normal := next(2, firstAnnounces, secondAnnounces)
+	if started.numWant != trackerAnnounceNumWant {
+		t.Fatalf("the normal membership asks for peers: %+v", started)
+	}
+
+	other := secondAnnounces
+	if normal == secondAnnounces {
+		other = firstAnnounces
+	}
+
+	select {
+	case seen := <-other:
+		t.Fatalf("no extra membership before the outgoing fetch fails, got %+v", seen)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	c.inbound.outgoingFailed(sampleRequest(hash))
+
+	if extra, _ := next(2, other); extra.numWant != 0 || extra.left == 0 {
+		t.Fatalf("the extra membership is a leecher that asks for no peers: %+v", extra)
+	}
+
+	c.inbound.fetchedOutgoing(hash)
+	next(3, normal)
+	next(3, other)
+
+	eventually(t, "extra counters", func() bool {
+		return hashCount(t, c, sourceInboundPeer, "extra_joined") == 1 &&
+			counterValue(t, scraper.metrics.packets, map[string]string{"result": "extra_ok"}) == 1
+	})
+
+	if started := counterValue(t, scraper.metrics.sent, map[string]string{"kind": tracker.SentStarted}); started != 2 {
+		t.Fatalf("want two started packets in all, got %v", started)
 	}
 }

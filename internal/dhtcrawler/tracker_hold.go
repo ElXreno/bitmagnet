@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/rand/v2"
 	"net/netip"
+	"sort"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/tracker"
@@ -30,11 +31,14 @@ func (s *trackerScraper) enableHolds(peerID protocol.ID, port uint16, capacity i
 	}
 
 	s.stops = make([]chan protocol.ID, len(s.hosts))
+	s.extras = make([]chan protocol.ID, len(s.hosts))
+
 	for i := range s.stops {
 		s.stops[i] = make(chan protocol.ID, capacity)
+		s.extras[i] = make(chan protocol.ID, trackerAnnounceQueue)
 	}
 
-	s.held = make(map[protocol.ID]int)
+	s.held = make(map[protocol.ID]uint32)
 	s.holdParams = tracker.AnnounceParams{
 		PeerID:  peerID,
 		Key:     rand.Uint32(),
@@ -54,15 +58,76 @@ func (s *trackerScraper) holding(hash protocol.ID) bool {
 	s.holdMu.Lock()
 	defer s.holdMu.Unlock()
 
-	_, held := s.held[hash]
-
-	return held
+	return s.held[hash] != 0
 }
 
 func (s *trackerScraper) markHeld(hash protocol.ID, index int) {
 	s.holdMu.Lock()
-	s.held[hash] = index
+	s.held[hash] |= 1 << index
 	s.holdMu.Unlock()
+}
+
+// wantExtras queues a membership on up to limit more trackers that saw seeders, the idlest first
+func (s *trackerScraper) wantExtras(hash protocol.ID, limit int) {
+	if s == nil || s.extras == nil {
+		return
+	}
+
+	info, ok := s.cache.Get(hash)
+	if !ok {
+		return
+	}
+
+	s.holdMu.Lock()
+	started := s.held[hash]
+	s.held[hash] = started
+	s.holdMu.Unlock()
+
+	var candidates []int
+
+	for index := range s.extras {
+		if info.seededBy&^started&(1<<index) != 0 {
+			candidates = append(candidates, index)
+		}
+	}
+
+	sort.SliceStable(candidates, func(a, b int) bool {
+		return len(s.extras[candidates[a]]) < len(s.extras[candidates[b]])
+	})
+
+	for _, index := range candidates[:min(limit, len(candidates))] {
+		select {
+		case s.extras[index] <- hash:
+		default:
+			s.countHold(index, "extra_queue_full")
+		}
+	}
+}
+
+func (s *trackerScraper) nextExtra(index int) (protocol.ID, bool) {
+	for {
+		select {
+		case hash := <-s.extras[index]:
+			s.holdMu.Lock()
+
+			started, wanted := s.held[hash]
+			fresh := wanted && started&(1<<index) == 0
+
+			if fresh {
+				s.held[hash] = started | 1<<index
+			}
+
+			s.holdMu.Unlock()
+
+			if fresh {
+				return hash, true
+			}
+
+			s.countHold(index, "extra_stale")
+		default:
+			return protocol.ID{}, false
+		}
+	}
 }
 
 func (s *trackerScraper) release(hash protocol.ID) {
@@ -71,12 +136,14 @@ func (s *trackerScraper) release(hash protocol.ID) {
 	}
 
 	s.holdMu.Lock()
-	index, held := s.held[hash]
+	started := s.held[hash]
 	delete(s.held, hash)
 	s.holdMu.Unlock()
 
-	if held {
-		s.queueStop(index, hash)
+	for index := range s.stops {
+		if started&(1<<index) != 0 {
+			s.queueStop(index, hash)
+		}
 	}
 }
 
@@ -117,6 +184,18 @@ func (s *trackerScraper) spendToken(index int) []announceJob {
 		jobs = append(jobs, job)
 	}
 
+	// an extra membership takes only a token that no normal announce is waiting for
+	if packets == 0 && s.extras != nil && !s.draining.Load() {
+		if hash, ok := s.nextExtra(index); ok {
+			jobs = append(jobs, announceJob{hash: hash, hold: true, extra: true})
+			packets = 1
+
+			if s.onExtra != nil {
+				s.onExtra(hash)
+			}
+		}
+	}
+
 	for ; packets < announceTokenPackets && s.stops != nil; packets++ {
 		select {
 		case hash := <-s.stops[index]:
@@ -151,6 +230,26 @@ func (s *trackerScraper) announceMember(ctx context.Context, index int, host str
 	}
 
 	s.announced(ctx, host, job.hash, job.seeders, result.Peers, err)
+}
+
+func (s *trackerScraper) announceExtra(ctx context.Context, index int, hash protocol.ID) {
+	params := s.holdParams
+	params.NumWant = 0
+
+	_, err := s.client.AnnounceStart(ctx, index, hash, params)
+
+	if !s.holding(hash) {
+		s.queueStop(index, hash)
+	}
+
+	switch {
+	case err == nil:
+		s.countHold(index, "extra_ok")
+	case errors.Is(err, tracker.ErrTimeout):
+		s.countHold(index, "extra_timeout")
+	default:
+		s.countHold(index, "extra_error")
+	}
 }
 
 func (s *trackerScraper) announced(

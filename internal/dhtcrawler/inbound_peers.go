@@ -50,6 +50,8 @@ type inboundConfig struct {
 	maxPerIP  int
 	lateMax   int
 	lateTTL   time.Duration
+	extraMin  uint32
+	extraMax  int
 	dht       bool
 }
 
@@ -68,6 +70,8 @@ func inboundConfigFromEnv() (inboundConfig, bool) {
 		maxPerIP:  envInt("BITMAGNET_INBOUND_MAX_CONNS_PER_IP", 8),
 		lateMax:   envInt("BITMAGNET_INBOUND_LATE_HASHES", 50_000),
 		lateTTL:   time.Duration(envInt("BITMAGNET_INBOUND_LATE_SECONDS", 900)) * time.Second,
+		extraMin:  uint32(envInt("BITMAGNET_INBOUND_EXTRA_MIN_SEEDERS", 2)),
+		extraMax:  envInt("BITMAGNET_INBOUND_EXTRA_TRACKERS", 3),
 		dht:       os.Getenv("BITMAGNET_INBOUND_DHT") == "on",
 	}, true
 }
@@ -85,6 +89,7 @@ type inboundEntry struct {
 	index     int
 	announced bool
 	failed    bool
+	extras    bool
 	late      bool
 	done      bool
 }
@@ -218,6 +223,7 @@ func (c *crawler) openInboundPeers(config inboundConfig, receiver metainforeques
 
 	for _, scraper := range p.trackers {
 		scraper.onHeld = p.announced
+		scraper.onExtra = p.extraJoined
 	}
 
 	if config.dht {
@@ -455,6 +461,10 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 
 	if kind == stageInboundLateConn {
 		c.countHash(sourceInboundPeer, stageMetaInfoOK+"_late", 1)
+	}
+
+	if p.hadExtras(entry) {
+		c.countHash(sourceInboundPeer, stageMetaInfoOK+"_extra", 1)
 	}
 
 	c.countHash(sourceInboundPeer, stageMetaInfoOK, 1)
@@ -725,6 +735,12 @@ func (p *inboundPeers) outgoingFailed(req nodeHasPeersForHash) {
 
 	first := ok && !entry.failed
 
+	if first && !entry.late && entry.seeders >= p.config.extraMin {
+		for _, scraper := range p.trackers {
+			scraper.wantExtras(req.infoHash, p.config.extraMax)
+		}
+	}
+
 	if ok {
 		entry.failed = true
 
@@ -738,6 +754,29 @@ func (p *inboundPeers) outgoingFailed(req nodeHasPeersForHash) {
 	if first {
 		p.c.countHash(sourceInboundPeer, "outgoing_failed", 1)
 	}
+}
+
+func (p *inboundPeers) extraJoined(hash protocol.ID) {
+	p.mu.Lock()
+	entry, ok := p.entries[hash]
+	first := ok && !entry.extras
+
+	if first {
+		entry.extras = true
+	}
+
+	p.mu.Unlock()
+
+	if first {
+		p.c.countHash(sourceInboundPeer, "extra_joined", 1)
+	}
+}
+
+func (p *inboundPeers) hadExtras(entry *inboundEntry) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return entry.extras
 }
 
 func sampled(source string) bool {

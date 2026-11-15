@@ -120,11 +120,13 @@ type trackerScraper struct {
 	announceParams   tracker.AnnounceParams
 	onPeers          func(ctx context.Context, hash protocol.ID, source string, peers []netip.AddrPort)
 	stops            []chan protocol.ID
+	extras           []chan protocol.ID
 	holdParams       tracker.AnnounceParams
 	holdMu           sync.Mutex
-	held             map[protocol.ID]int
+	held             map[protocol.ID]uint32
 	join             joinFunc
 	onHeld           func(hash protocol.ID)
+	onExtra          func(hash protocol.ID)
 	draining         atomic.Bool
 	prefix           string
 	hosts            []string
@@ -436,6 +438,7 @@ type announceJob struct {
 	hash    protocol.ID
 	seeders uint32
 	hold    bool
+	extra   bool
 	stop    bool
 }
 
@@ -477,6 +480,8 @@ func (s *trackerScraper) runAnnounces(ctx context.Context, index int) {
 			switch {
 			case job.stop:
 				go s.announceStop(ctx, index, job.hash)
+			case job.extra:
+				go s.announceExtra(ctx, index, job.hash)
 			case job.hold:
 				go s.announceMember(ctx, index, host, job)
 			default:

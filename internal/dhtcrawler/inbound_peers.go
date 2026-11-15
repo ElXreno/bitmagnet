@@ -443,6 +443,17 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 	c.countHash(sourceInboundPeer, kind, 1)
 
 	if entry == nil {
+		if kind == stageInboundUnknownHash {
+			switch {
+			case c.fetched.test(in.InfoHash):
+				c.countHash(sourceInboundPeer, "unknown_fetched", 1)
+			case c.closedSwarms.test(in.InfoHash):
+				c.countHash(sourceInboundPeer, "unknown_closed", 1)
+			default:
+				c.countHash(sourceInboundPeer, "unknown_other", 1)
+			}
+		}
+
 		return kind
 	}
 

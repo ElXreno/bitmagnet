@@ -49,3 +49,21 @@ func TestNodePoolClosest(t *testing.T) {
 		t.Fatalf("high edge: %v", high)
 	}
 }
+
+func TestFartherThanKth(t *testing.T) {
+	t.Parallel()
+
+	responded := []protocol.ID{{1}, {2}, {3}}
+
+	if fartherThanKth(protocol.ID{9}, responded[:2], 3) {
+		t.Fatal("fewer than k answers: the lookup must go on")
+	}
+
+	if !fartherThanKth(protocol.ID{9}, responded, 3) {
+		t.Fatal("k closer answers: the lookup is over")
+	}
+
+	if fartherThanKth(protocol.ID{2}, responded, 3) {
+		t.Fatal("a candidate inside the k closest must still be asked")
+	}
+}

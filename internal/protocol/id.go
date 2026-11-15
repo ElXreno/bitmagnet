@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/anacrolix/torrent/bencode"
@@ -222,7 +223,12 @@ func RandomPeerID() ID {
 	clientID := RandomNodeID()
 	i := 0
 
-	for _, c := range idClientPart {
+	prefix := idClientPart
+	if p := os.Getenv("BITMAGNET_PEER_ID_PREFIX"); len(p) == len(idClientPart) {
+		prefix = p
+	}
+
+	for _, c := range prefix {
 		clientID[i] = byte(c)
 		i++
 	}

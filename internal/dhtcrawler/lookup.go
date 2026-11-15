@@ -22,6 +22,7 @@ const (
 	lookupQueryTimeout   = 2 * time.Second
 	lookupMaxLimiterWait = 50 * time.Millisecond
 	lookupPoolSeeds      = 16
+	lookupClosestK       = 8
 )
 
 var (
@@ -87,6 +88,9 @@ func (c *crawler) lookupPeers(
 	inflight := 0
 	afterFirstPeers := 0
 	completed := 0
+
+	var responded []protocol.ID
+
 	firstPeersAt := 0
 	stop := false
 
@@ -111,7 +115,7 @@ func (c *crawler) lookupPeers(
 				}
 			}
 
-			if best == nil {
+			if best == nil || fartherThanKth(best.distance, responded, lookupClosestK) {
 				break
 			}
 
@@ -142,6 +146,7 @@ func (c *crawler) lookupPeers(
 		}
 
 		if r.ok {
+			responded = append(responded, r.node.distance)
 			c.nodePool.add(r.res.ID, r.node.addr)
 
 			for _, v := range r.res.Values {
@@ -183,4 +188,22 @@ func (c *crawler) lookupPeers(
 	}
 
 	return result
+}
+
+// fartherThanKth reports whether distance is beyond the k-th closest node that has answered, which is where a
+// Kademlia lookup ends: nothing closer is left to ask.
+func fartherThanKth(distance protocol.ID, responded []protocol.ID, k int) bool {
+	if len(responded) < k {
+		return false
+	}
+
+	closer := 0
+
+	for _, d := range responded {
+		if bytes.Compare(d[:], distance[:]) < 0 {
+			closer++
+		}
+	}
+
+	return closer >= k
 }

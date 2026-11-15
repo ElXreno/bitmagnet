@@ -3,16 +3,19 @@ package metainforequester
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/anacrolix/torrent/bencode"
 	mi "github.com/anacrolix/torrent/metainfo"
+	"github.com/anacrolix/torrent/mse"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester/peertest"
@@ -414,5 +417,36 @@ func TestIncomingMessages(t *testing.T) {
 	_, err = io.ReadAll(&incomingMessages{r: bytes.NewReader(extended[:len(extended)-3])})
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("a truncated message: want io.ErrUnexpectedEOF, got %v", err)
+	}
+}
+
+func BenchmarkAcceptUnknownMSE(b *testing.B) {
+	unknown := protocol.ID{0xff, 0xfe}
+
+	for _, n := range []int{1, 2000, 20000, 70000} {
+		keys := make([]protocol.ID, n)
+		for i := range keys {
+			binary.BigEndian.PutUint64(keys[i][:], uint64(i+1)*0x9e3779b97f4a7c15)
+		}
+
+		receiver := NewReceiver(protocol.RandomPeerID(), 5*time.Second)
+
+		b.Run(strconv.Itoa(n), func(b *testing.B) {
+			for range b.N {
+				client, server := net.Pipe()
+
+				go func() {
+					_, _, _ = mse.InitiateHandshake(client, unknown[:], nil, mse.AllSupportedCrypto)
+					_ = client.Close()
+				}()
+
+				_, err := receiver.Accept(server, func() []protocol.ID { return keys })
+				_ = server.Close()
+
+				if !errors.Is(err, ErrUnknownInfoHash) {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }

@@ -33,9 +33,11 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 			} else if errors.Is(reqErr, errNoCandidates) {
 				c.countHash(req.source, "no_candidates", 1)
 				c.trackerOutcome(req.infoHash, "no_candidates")
+				c.giveUp(req.infoHash)
 			} else {
 				c.countHash(req.source, stageMetaInfoFail, 1)
 				c.trackerOutcome(req.infoHash, stageMetaInfoFail)
+				c.giveUp(req.infoHash)
 			}
 
 			return

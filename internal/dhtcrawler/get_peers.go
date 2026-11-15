@@ -37,6 +37,7 @@ func (c *crawler) runGetPeers(ctx context.Context) {
 			if c.unseeded(req.infoHash) {
 				c.countHash(req.source, "lookup_skipped", 1)
 				c.trackerOutcome(req.infoHash, "lookup_skipped")
+				c.giveUp(req.infoHash)
 
 				return
 			}
@@ -83,6 +84,7 @@ func (c *crawler) runLookups(ctx context.Context, ch concurrency.BufferedConcurr
 
 		if len(peers) == 0 {
 			c.trackerOutcome(req.infoHash, stageLookupEmpty)
+			c.giveUp(req.infoHash)
 
 			return
 		}

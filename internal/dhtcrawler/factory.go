@@ -2,6 +2,7 @@ package dhtcrawler
 
 import (
 	"context"
+	"os"
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/blocking"
@@ -118,6 +119,16 @@ func New(params Params) Result {
 					if err != nil {
 						return err
 					}
+					var failed *failedHashes
+
+					if os.Getenv("BITMAGNET_FAILED_MEMORY") != "off" {
+						failed, err = newFailedHashes(
+							"failed_hashes", time.Duration(envInt("BITMAGNET_FAILED_TTL_HOURS", 6))*time.Hour)
+						if err != nil {
+							return err
+						}
+					}
+
 					trackers, err := newTrackerScraper(trackerMetrics)
 					if err != nil {
 						return err
@@ -145,6 +156,7 @@ func New(params Params) Result {
 						probeTotal:    probeTotal,
 						lookupQueries: lookupQueries,
 						trackers:      trackers,
+						failed:        failed,
 						fetched: &ignoreFilter{
 							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
 						},
@@ -214,6 +226,11 @@ func New(params Params) Result {
 					if c.stopped != nil {
 						close(c.stopped)
 					}
+
+					if err := c.failed.save(); err != nil {
+						return err
+					}
+
 					return nil
 				},
 			},

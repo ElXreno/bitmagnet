@@ -45,6 +45,7 @@ type crawler struct {
 	pingCache                    *pingCache
 	trackers                     *trackerScraper
 	fetched                      *ignoreFilter
+	failed                       *failedHashes
 	nodesForPing                 concurrency.BufferedConcurrentChannel[ktable.Node]
 	nodesForFindNode             concurrency.BufferedConcurrentChannel[ktable.Node]
 	nodesForSampleInfoHashes     concurrency.BufferedConcurrentChannel[ktable.Node]
@@ -94,6 +95,7 @@ func (c *crawler) start() {
 	go c.runLookups(ctx, c.lookupsInbound)
 	go c.reportStages(ctx)
 	go c.runNodePool(ctx)
+	go c.saveFailedHashes(ctx)
 	if c.trackers != nil {
 		c.trackers.onPeers = c.trackerPeers
 	}
@@ -199,4 +201,22 @@ func (c *crawler) rotateSoughtNodeID(ctx context.Context) {
 
 func prometheusLabels(stage string, kind string) prometheus.Labels {
 	return prometheus.Labels{"stage": stage, "kind": kind}
+}
+
+func (c *crawler) saveFailedHashes(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Minute):
+			if err := c.failed.save(); err != nil {
+				c.logger.Errorf("failed to save the failed info hash memory: %s", err.Error())
+			}
+		}
+	}
+}
+
+// giveUp records that the meta info of hash could not be fetched, so that it is left alone for a while.
+func (c *crawler) giveUp(hash protocol.ID) {
+	c.failed.add(hash)
 }

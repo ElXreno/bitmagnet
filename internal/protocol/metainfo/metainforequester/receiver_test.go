@@ -274,6 +274,60 @@ func acceptRaw(t *testing.T, receiver Receiver, sent string, closeAfter bool) (*
 	return receiver.Accept(conn, func() []protocol.ID { return nil })
 }
 
+func TestBencodeUnsafe(t *testing.T) {
+	t.Parallel()
+
+	nested := func(depth int) []byte {
+		value := append([]byte("d1:x"), bytes.Repeat([]byte("l"), depth)...)
+		value = append(value, bytes.Repeat([]byte("e"), depth)...)
+
+		return append(value, 'e')
+	}
+
+	metadata, _ := testMetadata(t, "plain")
+
+	for name, test := range map[string]struct {
+		value  []byte
+		unsafe bool
+	}{
+		"meta info":                     {metadata, false},
+		"extended handshake":            {[]byte("d1:md11:ut_metadatai3ee13:metadata_sizei1000e1:v4:teste"), false},
+		"nested to the limit":           {nested(incomingMaxDepth - 1), false},
+		"nested past the limit":         {nested(incomingMaxDepth), true},
+		"string longer than the value":  {[]byte("d1:v134217727:xe"), true},
+		"string that ends at the value": {[]byte("d1:v2:xye"), false},
+		"raw bytes after the value":     {append([]byte("d5:piecei0ee"), bytes.Repeat([]byte("l"), 5000)...), false},
+		"not bencode":                   {[]byte("hello"), false},
+		"number without an end":         {[]byte("d1:xi5"), false},
+		"empty":                         {nil, false},
+	} {
+		if got := bencodeUnsafe(test.value, incomingMaxDepth); got != test.unsafe {
+			t.Errorf("%s: unsafe %v, want %v", name, got, test.unsafe)
+		}
+	}
+
+	hostile := append([]byte("d4:name1:x12:piece lengthi16384e1:z"), nested(3000)...)
+	hostile = append(hostile, 'e')
+	hash := protocol.ID(mi.HashBytes(hostile))
+
+	got := receive(t, peertest.Peer{InfoHash: hash, Metadata: hostile}, nil)
+	if !errors.Is(got.err, errIncomingBencode) {
+		t.Fatalf("meta info nested 3000 deep with a matching hash: want errIncomingBencode, got %v", got.err)
+	}
+
+	for name, dict := range map[string]string{
+		"nested handshake":      string(nested(3000)),
+		"handshake with a huge": "d1:v134217727:x",
+	} {
+		prelude := peertest.Frame(append([]byte{20, 0}, dict...)...)
+
+		got = receive(t, peertest.Peer{InfoHash: hash, Metadata: hostile, Prelude: prelude}, nil)
+		if !errors.Is(got.err, errIncomingBencode) {
+			t.Errorf("%s: want errIncomingBencode, got %v", name, got.err)
+		}
+	}
+}
+
 func TestReceiveBudget(t *testing.T) {
 	t.Parallel()
 

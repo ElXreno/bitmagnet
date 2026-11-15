@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -27,6 +28,7 @@ var (
 	ErrIncomingBudget    = errors.New("incoming meta info memory budget is spent")
 
 	errIncomingMessageTooLong = errors.New("incoming message is longer than max allowed")
+	errIncomingBencode        = errors.New("incoming bencode is nested too deep or claims a string it does not hold")
 )
 
 const (
@@ -34,6 +36,7 @@ const (
 
 	incomingMaxExtended = metadataPieceSize + 1024
 	incomingMaxMessage  = 1 << 20
+	incomingMaxDepth    = 1024
 	incomingBudget      = 256 << 20
 )
 
@@ -209,6 +212,12 @@ func (in *Incoming) Fetch() (Response, error) {
 		return Response{}, piecesErr
 	}
 
+	if bencodeUnsafe(pieces, incomingMaxDepth) {
+		outcome("bad_metainfo")
+
+		return Response{}, errIncomingBencode
+	}
+
 	parsed, parseErr := metainfo.ParseMetaInfoBytes(in.InfoHash, pieces)
 	if parseErr != nil {
 		outcome("bad_metainfo")
@@ -272,6 +281,10 @@ func (m *incomingMessages) Read(p []byte) (int, error) {
 			return 0, err
 		}
 
+		if length > 2 && bencodeUnsafe(frame[6:], incomingMaxDepth) {
+			return 0, errIncomingBencode
+		}
+
 		m.frame = frame
 	}
 
@@ -279,4 +292,57 @@ func (m *incomingMessages) Read(p []byte) (int, error) {
 	m.frame = m.frame[n:]
 
 	return n, nil
+}
+
+// the decoder recurses per nesting level and allocates what a string length claims
+func bencodeUnsafe(b []byte, limit int) bool {
+	depth := 0
+
+	for i := 0; i < len(b); {
+		switch c := b[i]; {
+		case c == 'd' || c == 'l':
+			depth++
+			i++
+
+			if depth > limit {
+				return true
+			}
+		case c == 'e':
+			depth--
+			i++
+		case c == 'i':
+			end := bytes.IndexByte(b[i:], 'e')
+			if end < 0 {
+				return false
+			}
+
+			i += end + 1
+		case c >= '0' && c <= '9':
+			colon := bytes.IndexByte(b[i:min(len(b), i+12)], ':')
+			if colon < 0 {
+				return false
+			}
+
+			length, err := strconv.Atoi(string(b[i : i+colon]))
+			if err != nil {
+				return false
+			}
+
+			i += colon + 1
+
+			if length > len(b)-i {
+				return true
+			}
+
+			i += length
+		default:
+			return false
+		}
+
+		if depth <= 0 {
+			return false
+		}
+	}
+
+	return false
 }

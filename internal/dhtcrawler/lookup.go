@@ -21,9 +21,11 @@ const (
 	lookupQueryTimeout = 2 * time.Second
 
 	lookupMaxLimiterWait = 50 * time.Millisecond
+	lookupPoolSeeds      = 16
 )
 
 type lookupNode struct {
+	id       protocol.ID
 	distance protocol.ID
 	addr     netip.AddrPort
 	queried  bool
@@ -50,11 +52,15 @@ func (c *crawler) lookupPeers(
 		}
 
 		if _, ok := candidates[addr]; !ok {
-			candidates[addr] = &lookupNode{distance: xorDistance(id, hash), addr: addr}
+			candidates[addr] = &lookupNode{id: id, distance: xorDistance(id, hash), addr: addr}
 		}
 	}
 
 	for _, n := range seeds {
+		add(n.ID, n.Addr)
+	}
+
+	for _, n := range c.nodePool.closest(hash, lookupPoolSeeds) {
 		add(n.ID, n.Addr)
 	}
 
@@ -69,8 +75,9 @@ func (c *crawler) lookupPeers(
 	stop := false
 
 	type lookupResult struct {
-		res client.GetPeersResult
-		ok  bool
+		res  client.GetPeersResult
+		ok   bool
+		node *lookupNode
 	}
 
 	results := make(chan lookupResult, lookupMaxQueries)
@@ -96,13 +103,14 @@ func (c *crawler) lookupPeers(
 			inflight++
 			queries++
 
-			go func(addr netip.AddrPort) {
+			go func(node *lookupNode) {
+				addr := node.addr
 				queryCtx, queryCancel := context.WithTimeout(lookupCtx, lookupQueryTimeout)
 				defer queryCancel()
 
 				res, err := c.client.GetPeers(queryCtx, addr, hash)
-				results <- lookupResult{res: res, ok: err == nil}
-			}(best.addr)
+				results <- lookupResult{res: res, ok: err == nil, node: node}
+			}(best)
 		}
 
 		if inflight == 0 {
@@ -117,6 +125,8 @@ func (c *crawler) lookupPeers(
 		}
 
 		if r.ok {
+			c.nodePool.add(r.res.ID, r.node.addr)
+
 			for _, v := range r.res.Values {
 				if len(peers) < lookupMaxPeers {
 					peers[v] = struct{}{}

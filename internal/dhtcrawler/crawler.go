@@ -40,6 +40,7 @@ type crawler struct {
 	stageGauge                   *prometheus.GaugeVec
 	probeTotal                   *prometheus.CounterVec
 	deadPeers                    *ignoreFilter
+	nodePool                     *nodePool
 	nodesForPing                 concurrency.BufferedConcurrentChannel[ktable.Node]
 	nodesForFindNode             concurrency.BufferedConcurrentChannel[ktable.Node]
 	nodesForSampleInfoHashes     concurrency.BufferedConcurrentChannel[ktable.Node]
@@ -88,6 +89,7 @@ func (c *crawler) start() {
 	go c.runLookups(ctx, c.lookups)
 	go c.runLookups(ctx, c.lookupsInbound)
 	go c.reportStages(ctx)
+	go c.runNodePool(ctx)
 	go c.runRequestMetaInfo(ctx)
 	go c.runScrape(ctx)
 	go c.reseedBootstrapNodes(ctx)
@@ -183,4 +185,8 @@ func (c *crawler) rotateSoughtNodeID(ctx context.Context) {
 			c.soughtNodeID.Set(protocol.RandomNodeID())
 		}
 	}
+}
+
+func prometheusLabels(stage string, kind string) prometheus.Labels {
+	return prometheus.Labels{"stage": stage, "kind": kind}
 }

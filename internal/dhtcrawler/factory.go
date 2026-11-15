@@ -125,6 +125,7 @@ func New(params Params) Result {
 						dialsTotal:  dialsTotal,
 						stageGauge:  stageGauge,
 						probeTotal:  probeTotal,
+						nodePool:    newNodePool(),
 						deadPeers: &ignoreFilter{
 							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
 						},

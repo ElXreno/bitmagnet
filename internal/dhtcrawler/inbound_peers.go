@@ -1,6 +1,7 @@
 package dhtcrawler
 
 import (
+	"container/heap"
 	"context"
 	"errors"
 	"expvar"
@@ -24,7 +25,10 @@ const (
 	stageInboundRegistered    = "registered"
 	stageInboundReplaced      = "replaced"
 	stageInboundSkippedFull   = "skipped_full"
+	stageInboundExpired       = "expired"
+	stageInboundFetchedOut    = "fetched_outgoing"
 	stageInboundUnknownHash   = "unknown_hash"
+	stageInboundActiveConn    = "active_conn"
 	stageInboundHandshake     = "handshake_failed"
 	stageInboundNoMetaInfo    = "peer_no_metainfo"
 	stageInboundFetchFailed   = "fetch_failed"
@@ -46,21 +50,61 @@ func inboundConfigFromEnv() (inboundConfig, bool) {
 		return inboundConfig{}, false
 	}
 
+	holdSeconds := envInt("BITMAGNET_INBOUND_HOLD_SECONDS", 300)
+	announcesPerSecond := envInt("BITMAGNET_TRACKER_ANNOUNCE_PPS", 30)
+
 	return inboundConfig{
-		maxHashes: envInt("BITMAGNET_INBOUND_MAX_HASHES", 2000),
-		hold:      time.Duration(envInt("BITMAGNET_INBOUND_HOLD_SECONDS", 300)) * time.Second,
+		maxHashes: envInt("BITMAGNET_INBOUND_MAX_HASHES", 2*announcesPerSecond*holdSeconds),
+		hold:      time.Duration(holdSeconds) * time.Second,
 		maxConns:  envInt("BITMAGNET_INBOUND_MAX_CONNS", 500),
 		dht:       os.Getenv("BITMAGNET_INBOUND_DHT") == "on",
 	}, true
 }
 
 type inboundEntry struct {
+	hash      protocol.ID
 	req       nodeHasPeersForHash
 	seeders   uint32
+	seq       uint64
 	since     time.Time
 	deadline  time.Time
 	active    int
+	index     int
 	announced bool
+	failed    bool
+	done      bool
+}
+
+type inboundHeap []*inboundEntry
+
+func (h inboundHeap) Len() int { return len(h) }
+
+func (h inboundHeap) Less(i, j int) bool {
+	if h[i].seeders != h[j].seeders {
+		return h[i].seeders < h[j].seeders
+	}
+
+	return h[i].seq < h[j].seq
+}
+
+func (h inboundHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].index, h[j].index = i, j
+}
+
+func (h *inboundHeap) Push(x any) {
+	entry := x.(*inboundEntry)
+	entry.index = len(*h)
+	*h = append(*h, entry)
+}
+
+func (h *inboundHeap) Pop() any {
+	old := *h
+	entry := old[len(old)-1]
+	old[len(old)-1] = nil
+	*h = old[:len(old)-1]
+
+	return entry
 }
 
 type inboundPeers struct {
@@ -75,6 +119,8 @@ type inboundPeers struct {
 	now        func() time.Time
 	mu         sync.Mutex
 	entries    map[protocol.ID]*inboundEntry
+	weakest    inboundHeap
+	seq        uint64
 }
 
 func listenInbound(port uint16, logger *zap.SugaredLogger) (v4 net.Listener, v6 net.Listener) {
@@ -124,14 +170,16 @@ func (c *crawler) openInboundPeers(config inboundConfig, receiver metainforeques
 		entries:   make(map[protocol.ID]*inboundEntry),
 	}
 
-	if c.trackers.enableHolds(receiver.PeerID(), listenerPort(v4)) {
+	stops := max(config.maxHashes, trackerAnnounceQueue)
+
+	if c.trackers.enableHolds(receiver.PeerID(), listenerPort(v4), stops, p.join) {
 		p.trackers = append(p.trackers, c.trackers)
 	}
 
 	if v6 != nil {
 		p.listeners = append(p.listeners, v6)
 
-		if c.trackers6.enableHolds(receiver.PeerID(), listenerPort(v6)) {
+		if c.trackers6.enableHolds(receiver.PeerID(), listenerPort(v6), stops, p.join) {
 			p.trackers = append(p.trackers, c.trackers6)
 		}
 	}
@@ -269,11 +317,11 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 		return inboundHandshakeResult(err)
 	}
 
-	entry, refusal := p.claim(in.InfoHash)
-	if entry == nil {
-		c.countHash(sourceInboundPeer, refusal, 1)
+	entry, kind := p.claim(in.InfoHash, in.Encrypted)
+	c.countHash(sourceInboundPeer, kind, 1)
 
-		return refusal
+	if entry == nil {
+		return kind
 	}
 
 	defer p.unclaim(entry)
@@ -330,14 +378,16 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 		c.countHash(sourceInboundPeer, stageMetaInfoOK+"6", 1)
 	}
 
+	origin := p.origin(entry)
+
 	select {
 	case <-ctx.Done():
 	case c.persistTorrents.In() <- infoHashWithMetaInfo{
 		nodeHasPeersForHash: nodeHasPeersForHash{
 			infoHash: in.InfoHash,
-			node:     entry.req.node,
+			node:     origin.node,
 			source:   sourceInboundPeer,
-			origin:   entry.req.source,
+			origin:   origin.source,
 		},
 		metaInfo: res.Info,
 	}:
@@ -350,104 +400,73 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 	return "ok"
 }
 
-func (p *inboundPeers) register(req nodeHasPeersForHash) {
-	if p == nil {
-		return
+// join decides whether the normal announce of a seeded hash stays in the swarm
+func (p *inboundPeers) join(s *trackerScraper, index int, hash protocol.ID, seeders uint32) joinVerdict {
+	if p.c.fetched.test(hash) {
+		return joinNone
 	}
 
-	if !p.c.seeded(req.infoHash) || p.c.fetched.test(req.infoHash) {
-		return
-	}
-
-	seeders := uint32(0)
-	for _, scraper := range p.trackers {
-		seeders = max(seeders, scraper.holdableSeeders(req.infoHash))
-	}
-
-	if seeders == 0 {
-		return
-	}
-
-	switch p.add(req, seeders) {
-	case "":
-		return
-	case stageInboundSkippedFull:
-		p.c.countHash(sourceInboundPeer, stageInboundSkippedFull, 1)
-
-		return
-	case stageInboundReplaced:
-		p.c.countHash(sourceInboundPeer, stageInboundReplaced, 1)
-	}
-
-	p.c.countHash(sourceInboundPeer, stageInboundRegistered, 1)
-	p.c.countHash(sourceInboundPeer, stageInboundRegistered+trackerSource(seeders), 1)
-	p.queueDHT(req.infoHash)
-}
-
-func (p *inboundPeers) add(req nodeHasPeersForHash, seeders uint32) string {
 	now := p.now()
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if _, exists := p.entries[req.infoHash]; exists {
-		return ""
-	}
+	_, known := p.entries[hash]
 
-	stage := stageInboundRegistered
+	switch {
+	case known && s.holding(hash):
+		return joinHeld
+	case known:
+	case len(p.entries) >= p.config.maxHashes && p.weakest[0].seeders >= seeders:
+		p.c.countHash(sourceInboundPeer, stageInboundSkippedFull, 1)
 
-	if len(p.entries) >= p.config.maxHashes {
-		weakest, found := p.weakest()
-		if !found || p.entries[weakest].seeders >= seeders {
-			return stageInboundSkippedFull
+		return joinNone
+	default:
+		if len(p.entries) >= p.config.maxHashes {
+			p.retire(p.weakest[0])
+			p.c.countHash(sourceInboundPeer, stageInboundReplaced, 1)
 		}
 
-		p.drop(weakest)
+		p.seq++
 
-		stage = stageInboundReplaced
+		entry := &inboundEntry{
+			hash:     hash,
+			seeders:  seeders,
+			seq:      p.seq,
+			since:    now,
+			deadline: now.Add(p.config.hold),
+		}
+
+		p.entries[hash] = entry
+		heap.Push(&p.weakest, entry)
+		p.c.countHash(sourceInboundPeer, stageInboundRegistered, 1)
+		p.c.countHash(sourceInboundPeer, stageInboundRegistered+trackerSource(seeders), 1)
+		p.queueDHT(hash)
 	}
 
-	p.entries[req.infoHash] = &inboundEntry{
-		req:      req,
-		seeders:  seeders,
-		since:    now,
-		deadline: now.Add(p.config.hold),
-	}
+	s.markHeld(hash, index)
 
-	for _, scraper := range p.trackers {
-		scraper.hold(req.infoHash)
-	}
-
-	return stage
+	return joinMember
 }
 
-func (p *inboundPeers) weakest() (protocol.ID, bool) {
-	var (
-		weakest protocol.ID
-		worst   *inboundEntry
-	)
-
-	for hash, entry := range p.entries {
-		if entry.active > 0 {
-			continue
-		}
-
-		if worst == nil || entry.seeders < worst.seeders ||
-			(entry.seeders == worst.seeders && entry.deadline.Before(worst.deadline)) {
-			weakest, worst = hash, entry
-		}
-	}
-
-	return weakest, worst != nil
-}
-
-// called with mu held, so that leaving a swarm cannot overtake joining it
-func (p *inboundPeers) drop(hash protocol.ID) {
-	delete(p.entries, hash)
+// retire keeps the hash wanted, forget does not; both need mu
+func (p *inboundPeers) retire(entry *inboundEntry) {
+	delete(p.entries, entry.hash)
+	heap.Remove(&p.weakest, entry.index)
 
 	for _, scraper := range p.trackers {
-		scraper.release(hash)
+		scraper.release(entry.hash)
 	}
+}
+
+func (p *inboundPeers) forget(hash protocol.ID) bool {
+	entry, ok := p.entries[hash]
+	if ok {
+		entry.done = true
+		p.retire(entry)
+	}
+
+	return ok
 }
 
 func (p *inboundPeers) announced(hash protocol.ID) {
@@ -472,9 +491,9 @@ func (p *inboundPeers) expire() {
 
 	p.mu.Lock()
 
-	for hash, entry := range p.entries {
-		if entry.active == 0 && !now.Before(entry.deadline) {
-			p.drop(hash)
+	for _, entry := range p.entries {
+		if !now.Before(entry.deadline) {
+			p.retire(entry)
 
 			expired++
 		}
@@ -482,41 +501,75 @@ func (p *inboundPeers) expire() {
 
 	p.mu.Unlock()
 
-	p.c.countHash(sourceInboundPeer, "expired", expired)
+	p.c.countHash(sourceInboundPeer, stageInboundExpired, expired)
 }
 
 func (p *inboundPeers) fetchedOutgoing(hash protocol.ID) {
+	p.release(hash, stageInboundFetchedOut)
+}
+
+func (p *inboundPeers) release(hash protocol.ID, stage string) {
 	if p == nil {
 		return
 	}
 
 	p.mu.Lock()
+	held := p.forget(hash)
+	p.mu.Unlock()
 
-	_, registered := p.entries[hash]
-	if registered {
-		p.drop(hash)
+	if held {
+		p.c.countHash(sourceInboundPeer, stage, 1)
+	}
+}
+
+func (p *inboundPeers) outgoingFailed(req nodeHasPeersForHash) {
+	if p == nil {
+		return
+	}
+
+	p.mu.Lock()
+	entry, ok := p.entries[req.infoHash]
+	first := ok && !entry.failed
+
+	if ok {
+		entry.failed = true
+
+		if entry.req.source == "" || (!sampled(entry.req.source) && sampled(req.source)) {
+			entry.req = req
+		}
 	}
 
 	p.mu.Unlock()
 
-	if registered {
-		p.c.countHash(sourceInboundPeer, "fetched_outgoing", 1)
+	if first {
+		p.c.countHash(sourceInboundPeer, "outgoing_failed", 1)
 	}
+}
+
+func sampled(source string) bool {
+	return isSampleSource(source) || isSampleLookupSource(source)
+}
+
+func (p *inboundPeers) origin(entry *inboundEntry) nodeHasPeersForHash {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return entry.req
 }
 
 func (p *inboundPeers) hashes() []protocol.ID {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	hashes := make([]protocol.ID, 0, len(p.entries))
-	for hash := range p.entries {
-		hashes = append(hashes, hash)
+	hashes := make([]protocol.ID, len(p.weakest))
+	for i, entry := range p.weakest {
+		hashes[i] = entry.hash
 	}
 
 	return hashes
 }
 
-func (p *inboundPeers) claim(hash protocol.ID) (*inboundEntry, string) {
+func (p *inboundPeers) claim(hash protocol.ID, _ bool) (*inboundEntry, string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -531,7 +584,7 @@ func (p *inboundPeers) claim(hash protocol.ID) (*inboundEntry, string) {
 
 	entry.active++
 
-	return entry, ""
+	return entry, stageInboundActiveConn
 }
 
 func (p *inboundPeers) unclaim(entry *inboundEntry) {
@@ -544,11 +597,12 @@ func (p *inboundPeers) take(entry *inboundEntry) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.entries[entry.req.infoHash] != entry {
+	if entry.done {
 		return false
 	}
 
-	p.drop(entry.req.infoHash)
+	entry.done = true
+	p.forget(entry.hash)
 
 	return true
 }

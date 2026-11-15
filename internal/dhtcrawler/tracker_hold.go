@@ -4,183 +4,185 @@ import (
 	"context"
 	"errors"
 	"math/rand/v2"
+	"net/netip"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/tracker"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-type holdJob struct {
-	hash protocol.ID
-	stop bool
-}
+type joinVerdict int
 
-type heldSwarm struct {
-	started  uint32
-	priority int
-}
+const (
+	joinNone joinVerdict = iota
+	joinMember
+	joinHeld
+)
 
-func (s *trackerScraper) enableHolds(peerID protocol.ID, port uint16) bool {
+// one limiter token has always paid for started plus stopped
+const announceTokenPackets = 2
+
+type joinFunc func(s *trackerScraper, index int, hash protocol.ID, seeders uint32) joinVerdict
+
+func (s *trackerScraper) enableHolds(peerID protocol.ID, port uint16, capacity int, join joinFunc) bool {
 	if s == nil || !s.announceEnabled {
 		return false
 	}
 
-	s.holdQueues = make([][announcePriorities]chan holdJob, len(s.hosts))
-
-	for i := range s.holdQueues {
-		for priority := range s.holdQueues[i] {
-			s.holdQueues[i][priority] = make(chan holdJob, trackerAnnounceQueue)
-		}
+	s.stops = make([]chan protocol.ID, len(s.hosts))
+	for i := range s.stops {
+		s.stops[i] = make(chan protocol.ID, capacity)
 	}
 
-	s.held = make(map[protocol.ID]heldSwarm)
-	s.holdParams = tracker.AnnounceParams{PeerID: peerID, Key: rand.Uint32(), Port: port}
+	s.held = make(map[protocol.ID]int)
+	s.holdParams = tracker.AnnounceParams{
+		PeerID:  peerID,
+		Key:     rand.Uint32(),
+		Port:    port,
+		NumWant: s.announceParams.NumWant,
+	}
+	s.join = join
 
 	return true
-}
-
-func (s *trackerScraper) holdableSeeders(hash protocol.ID) uint32 {
-	if s == nil || s.holdQueues == nil {
-		return 0
-	}
-
-	info, _ := s.cache.Get(hash)
-
-	return info.seeders
 }
 
 func (s *trackerScraper) countHold(index int, result string) {
 	s.metrics.packets.With(prometheus.Labels{"tracker": s.hosts[index], "result": result}).Inc()
 }
 
-func (s *trackerScraper) hold(hash protocol.ID) {
-	if s == nil || s.holdQueues == nil {
-		return
-	}
-
-	info, ok := s.cache.Get(hash)
-	if !ok || info.seeders == 0 {
-		return
-	}
-
-	priority := announcePriority(info.seeders)
-
+func (s *trackerScraper) holding(hash protocol.ID) bool {
 	s.holdMu.Lock()
+	defer s.holdMu.Unlock()
 
-	if _, held := s.held[hash]; !held {
-		s.held[hash] = heldSwarm{priority: priority}
-	}
+	_, held := s.held[hash]
 
+	return held
+}
+
+func (s *trackerScraper) markHeld(hash protocol.ID, index int) {
+	s.holdMu.Lock()
+	s.held[hash] = index
 	s.holdMu.Unlock()
-
-	for index := range s.holdQueues {
-		if info.seededBy&(1<<index) == 0 {
-			continue
-		}
-
-		select {
-		case s.holdQueues[index][priority] <- holdJob{hash: hash}:
-		default:
-			s.countHold(index, "hold_queue_full")
-		}
-	}
 }
 
 func (s *trackerScraper) release(hash protocol.ID) {
-	if s == nil || s.holdQueues == nil {
+	if s == nil || s.stops == nil {
 		return
 	}
 
 	s.holdMu.Lock()
-	swarm, held := s.held[hash]
+	index, held := s.held[hash]
 	delete(s.held, hash)
 	s.holdMu.Unlock()
 
-	if !held {
-		return
-	}
-
-	for index := range s.holdQueues {
-		if swarm.started&(1<<index) != 0 {
-			s.queueStop(index, swarm.priority, hash)
-		}
+	if held {
+		s.queueStop(index, hash)
 	}
 }
 
-func (s *trackerScraper) queueStop(index int, priority int, hash protocol.ID) {
+func (s *trackerScraper) queueStop(index int, hash protocol.ID) {
 	select {
-	case s.holdQueues[index][priority] <- holdJob{hash: hash, stop: true}:
+	case s.stops[index] <- hash:
 	default:
 		s.countHold(index, "hold_stop_dropped")
 	}
 }
 
-func (s *trackerScraper) startHold(hash protocol.ID, index int) bool {
-	s.holdMu.Lock()
-	defer s.holdMu.Unlock()
+func (s *trackerScraper) spendToken(index int) []announceJob {
+	var jobs []announceJob
 
-	swarm, held := s.held[hash]
-	if !held {
-		return false
+	packets := 0
+
+	for packets == 0 {
+		job, ok := s.nextAnnounce(index)
+		if !ok {
+			break
+		}
+
+		verdict := joinNone
+		if s.join != nil {
+			verdict = s.join(s, index, job.hash, job.seeders)
+		}
+
+		switch verdict {
+		case joinHeld:
+			continue
+		case joinMember:
+			job.hold = true
+			packets = 1
+		case joinNone:
+			packets = announceTokenPackets
+		}
+
+		jobs = append(jobs, job)
 	}
 
-	swarm.started |= 1 << index
-	s.held[hash] = swarm
-
-	return true
-}
-
-func (s *trackerScraper) nextHold(index int, priority int) (announceJob, bool) {
-	if s.holdQueues == nil {
-		return announceJob{}, false
-	}
-
-	for {
+	for ; packets < announceTokenPackets && s.stops != nil; packets++ {
 		select {
-		case job := <-s.holdQueues[index][priority]:
-			if job.stop || s.startHold(job.hash, index) {
-				return announceJob{hash: job.hash, priority: priority, hold: !job.stop, stop: job.stop}, true
-			}
-
-			s.countHold(index, "hold_stale")
+		case hash := <-s.stops[index]:
+			jobs = append(jobs, announceJob{hash: hash, stop: true})
 		default:
-			return announceJob{}, false
+			return jobs
 		}
 	}
+
+	return jobs
 }
 
-func (s *trackerScraper) announceHold(ctx context.Context, index int, host string, job announceJob) {
-	_, err := s.client.AnnounceStart(ctx, index, job.hash, s.holdParams)
-
-	s.holdMu.Lock()
-	_, held := s.held[job.hash]
-	s.holdMu.Unlock()
+func (s *trackerScraper) announceMember(ctx context.Context, index int, host string, job announceJob) {
+	result, err := s.client.AnnounceStart(ctx, index, job.hash, s.holdParams)
 
 	// the stop queued by release may have left before this start arrived
-	if !held {
-		s.queueStop(index, job.priority, job.hash)
+	if !s.holding(job.hash) {
+		s.queueStop(index, job.hash)
 	}
 
 	switch {
 	case err == nil:
-		s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "hold_ok"}).Inc()
+		s.countHold(index, "hold_ok")
 
 		if s.onHeld != nil {
 			s.onHeld(job.hash)
 		}
 	case errors.Is(err, tracker.ErrTimeout):
-		s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "hold_timeout"}).Inc()
+		s.countHold(index, "hold_timeout")
 	default:
-		s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "hold_error"}).Inc()
+		s.countHold(index, "hold_error")
+	}
+
+	s.announced(ctx, host, job.hash, job.seeders, result.Peers, err)
+}
+
+func (s *trackerScraper) announced(
+	ctx context.Context,
+	host string,
+	hash protocol.ID,
+	seeders uint32,
+	peers []netip.AddrPort,
+	err error,
+) {
+	switch {
+	case err == nil && len(peers) > 0:
+		s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_ok"}).Inc()
+
+		if s.onPeers != nil {
+			s.onPeers(ctx, hash, s.prefix+trackerSource(seeders), peers)
+		}
+	case err == nil:
+		s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_no_peers"}).Inc()
+	case errors.Is(err, tracker.ErrTimeout):
+		s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_timeout"}).Inc()
+	default:
+		s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_error"}).Inc()
 	}
 }
 
-func (s *trackerScraper) announceStop(ctx context.Context, index int, host string, hash protocol.ID) {
+func (s *trackerScraper) announceStop(ctx context.Context, index int, hash protocol.ID) {
 	if err := s.client.AnnounceStop(ctx, index, hash, s.holdParams); err != nil {
-		s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "hold_stop_error"}).Inc()
+		s.countHold(index, "hold_stop_error")
 
 		return
 	}
 
-	s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "hold_stop"}).Inc()
+	s.countHold(index, "hold_stop")
 }

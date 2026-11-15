@@ -45,9 +45,11 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 			if errors.Is(reqErr, errBanned) {
 				c.countHash(req.source, stageBanned, 1)
 				c.trackerOutcome(req.infoHash, stageBanned)
+				c.inbound.release(req.infoHash, "released_banned")
 			} else if errors.Is(reqErr, errClosedSwarm) {
 				c.countHash(req.source, "closed_swarm", 1)
 				c.trackerOutcome(req.infoHash, "closed_swarm")
+				c.inbound.release(req.infoHash, "released_closed_swarm")
 
 				if closedSwarmPolicy {
 					c.closedSwarms.add(req.infoHash)
@@ -58,16 +60,17 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 				c.countHash(req.source, "closed_swarm_hint", 1)
 				c.trackerOutcome(req.infoHash, "closed_swarm_hint")
 				c.closedSwarms.add(req.infoHash)
+				c.inbound.release(req.infoHash, "released_closed_swarm")
 			} else if errors.Is(reqErr, errNoCandidates) {
 				c.countHash(req.source, "no_candidates", 1)
 				c.trackerOutcome(req.infoHash, "no_candidates")
 				c.giveUp(req.infoHash)
-				c.inbound.register(req.nodeHasPeersForHash)
+				c.inbound.outgoingFailed(req.nodeHasPeersForHash)
 			} else {
 				c.countHash(req.source, stageMetaInfoFail, 1)
 				c.trackerOutcome(req.infoHash, stageMetaInfoFail)
 				c.giveUp(req.infoHash)
-				c.inbound.register(req.nodeHasPeersForHash)
+				c.inbound.outgoingFailed(req.nodeHasPeersForHash)
 			}
 
 			return

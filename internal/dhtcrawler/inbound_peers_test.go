@@ -23,6 +23,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester/peertest"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/tracker"
 	lru "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/prometheus/client_golang/prometheus"
 	boom "github.com/tylertreat/BoomFilters"
@@ -49,6 +50,7 @@ func offlineScraper(hosts int) *trackerScraper {
 	s := &trackerScraper{
 		prefix:          "tracker",
 		announceEnabled: true,
+		announceParams:  tracker.AnnounceParams{Port: 6881, NumWant: trackerAnnounceNumWant},
 		announces:       make([][announcePriorities]chan protocol.ID, hosts),
 		cache:           lru.NewLRU[protocol.ID, trackerInfo](1000, nil, time.Minute),
 		metrics:         newTrackerMetrics(),
@@ -130,15 +132,64 @@ func startInboundTest(t *testing.T, c *crawler, config inboundConfig, scraper *t
 	return inboundTest{crawler: c, scraper: scraper, clock: clock, blocks: blocks}
 }
 
-func (i inboundTest) seed(hash protocol.ID, seeders uint32, seededBy uint32) nodeHasPeersForHash {
-	i.scraper.cache.Add(hash, trackerInfo{seeders: seeders, seededBy: seededBy})
+func (i inboundTest) join(hash protocol.ID, seeders uint32) joinVerdict {
+	return i.inbound.join(i.scraper, 0, hash, seeders)
+}
 
+func sampleRequest(hash protocol.ID) nodeHasPeersForHash {
 	return nodeHasPeersForHash{
 		infoHash: hash,
 		node:     netip.MustParseAddrPort("192.0.2.9:6881"),
 		source:   sourceSample,
 		class:    "fresh",
 	}
+}
+
+func (i inboundTest) stops() []protocol.ID {
+	var stops []protocol.ID
+
+	for {
+		select {
+		case hash := <-i.scraper.stops[0]:
+			stops = append(stops, hash)
+		default:
+			return stops
+		}
+	}
+}
+
+func counterValue(t *testing.T, collector prometheus.Collector, want map[string]string) float64 {
+	t.Helper()
+
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(collector)
+
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	total := 0.0
+
+	for _, family := range families {
+	metrics:
+		for _, metric := range family.GetMetric() {
+			labels := map[string]string{}
+			for _, label := range metric.GetLabel() {
+				labels[label.GetName()] = label.GetValue()
+			}
+
+			for name, value := range want {
+				if labels[name] != value {
+					continue metrics
+				}
+			}
+
+			total += metric.GetCounter().GetValue()
+		}
+	}
+
+	return total
 }
 
 func (i inboundTest) address() string {
@@ -224,66 +275,53 @@ func dialCount(t *testing.T, c *crawler, result string) float64 {
 func TestInboundRegistryCapacityAndReplacement(t *testing.T) {
 	t.Parallel()
 
-	i := newInboundTest(t, inboundConfig{maxHashes: 2, hold: time.Minute, maxConns: 4}, offlineScraper(1))
-	five, ten, three, alsoFive, seven := protocol.ID{1}, protocol.ID{2}, protocol.ID{3}, protocol.ID{4}, protocol.ID{5}
+	i := newInboundTest(t, inboundConfig{maxHashes: 3, hold: time.Minute, maxConns: 4}, offlineScraper(1))
+	older, newer, nine, six := protocol.ID{1}, protocol.ID{2}, protocol.ID{3}, protocol.ID{4}
 
-	i.inbound.register(nodeHasPeersForHash{infoHash: protocol.ID{9}})
-	i.scraper.cache.Add(protocol.ID{8}, trackerInfo{leechers: 4})
-	i.inbound.register(nodeHasPeersForHash{infoHash: protocol.ID{8}})
-
-	fetched := i.seed(protocol.ID{7}, 50, 1)
 	i.fetched.add(protocol.ID{7})
-	i.inbound.register(fetched)
 
-	if len(i.registered()) != 0 {
-		t.Fatalf("a hash without seeders or one fetched already was registered: %v", i.registered())
+	if i.join(protocol.ID{7}, 50) != joinNone || len(i.registered()) != 0 {
+		t.Fatal("a hash fetched already must get the usual announce")
 	}
 
-	i.inbound.register(i.seed(five, 5, 1))
-	i.inbound.register(i.seed(ten, 10, 1))
-	i.inbound.register(i.seed(five, 5, 1))
-
-	if got := i.registered(); len(got) != 2 || !got[five] || !got[ten] {
-		t.Fatalf("want the first two hashes, got %v", got)
+	for n, step := range []struct {
+		hash    protocol.ID
+		seeders uint32
+		want    joinVerdict
+	}{
+		{older, 5, joinMember},
+		{newer, 5, joinMember},
+		{nine, 9, joinMember},
+		{older, 5, joinHeld},
+		{protocol.ID{5}, 3, joinNone},
+		{protocol.ID{6}, 5, joinNone},
+		{six, 6, joinMember},
+	} {
+		if got := i.join(step.hash, step.seeders); got != step.want {
+			t.Fatalf("step %d: want verdict %d, got %d", n, step.want, got)
+		}
 	}
 
-	i.inbound.register(i.seed(three, 3, 1))
-	i.inbound.register(i.seed(alsoFive, 5, 1))
-
-	if got := i.registered(); len(got) != 2 || !got[five] || !got[ten] {
-		t.Fatalf("a hash that is not stronger than the weakest one got in: %v", got)
+	if got := i.registered(); len(got) != 3 || !got[newer] || !got[nine] || !got[six] {
+		t.Fatalf("want the oldest of the hashes with the fewest seeders replaced, got %v", got)
 	}
 
-	i.inbound.register(i.seed(seven, 7, 1))
-
-	if got := i.registered(); len(got) != 2 || !got[seven] || !got[ten] {
-		t.Fatalf("want the stronger hash in place of the weakest, got %v", got)
+	if stops := i.stops(); len(stops) != 1 || stops[0] != older {
+		t.Fatalf("want one stop, for the replaced hash, got %v", stops)
 	}
 
-	busySeven, _ := i.inbound.claim(seven)
-	busyTen, _ := i.inbound.claim(ten)
+	other := offlineScraper(1)
+	other.enableHolds(protocol.ID{}, 1, 4, i.inbound.join)
 
-	i.inbound.register(i.seed(protocol.ID{6}, 100, 1))
-
-	if got := i.registered(); len(got) != 2 || !got[seven] || !got[ten] {
-		t.Fatalf("a hash with a fetch in flight was evicted: %v", got)
+	if i.inbound.join(other, 0, nine, 9) != joinMember || !other.holding(nine) || len(i.registered()) != 3 {
+		t.Fatal("the scraper of the other family must join a known hash without a new entry")
 	}
-
-	i.inbound.unclaim(busyTen)
-	i.inbound.register(i.seed(protocol.ID{6}, 100, 1))
-
-	if got := i.registered(); len(got) != 2 || !got[seven] || !got[protocol.ID{6}] {
-		t.Fatalf("want the idle hash replaced and the busy one kept, got %v", got)
-	}
-
-	i.inbound.unclaim(busySeven)
 
 	for stage, want := range map[string]float64{
 		stageInboundRegistered:           4,
-		stageInboundRegistered + "_5_19": 3,
-		stageInboundRegistered + "_20":   1,
-		stageInboundSkippedFull:          3,
-		stageInboundReplaced:             2,
+		stageInboundRegistered + "_5_19": 4,
+		stageInboundSkippedFull:          2,
+		stageInboundReplaced:             1,
 	} {
 		if got := hashCount(t, i.crawler, sourceInboundPeer, stage); got != want {
 			t.Errorf("stage %s: want %v, got %v", stage, want, got)
@@ -291,20 +329,29 @@ func TestInboundRegistryCapacityAndReplacement(t *testing.T) {
 	}
 }
 
-func TestInboundRegistryExpiry(t *testing.T) {
+func TestInboundRegistryEnds(t *testing.T) {
 	t.Parallel()
 
 	i := newInboundTest(t, inboundConfig{maxHashes: 10, hold: time.Minute, maxConns: 4}, offlineScraper(1))
-	idle, busy := protocol.ID{1}, protocol.ID{2}
+	expiring, busy, closed, fetched := protocol.ID{1}, protocol.ID{2}, protocol.ID{3}, protocol.ID{4}
 
-	i.inbound.register(i.seed(idle, 5, 1))
-	i.inbound.register(i.seed(busy, 5, 1))
+	i.join(expiring, 5)
+	i.join(busy, 5)
 
-	if job, ok := i.scraper.nextAnnounce(0); !ok || !job.hold {
-		t.Fatalf("want a hold announce queued, got %+v", job)
+	claimed, kind := i.inbound.claim(busy, false)
+	if claimed == nil || kind != stageInboundActiveConn {
+		t.Fatalf("claim of a held hash: %s", kind)
 	}
 
-	claimed, _ := i.inbound.claim(busy)
+	deadline := claimed.deadline
+
+	i.inbound.outgoingFailed(sampleRequest(busy))
+	i.inbound.outgoingFailed(nodeHasPeersForHash{infoHash: busy, source: "tracker_20"})
+	i.inbound.outgoingFailed(sampleRequest(protocol.ID{0xee}))
+
+	if !claimed.deadline.Equal(deadline) || i.inbound.origin(claimed).source != sourceSample {
+		t.Fatal("a failed outgoing fetch records where the hash came from and leaves the deadline alone")
+	}
 
 	i.clock.Add(int64(59 * time.Second))
 	i.inbound.expire()
@@ -316,112 +363,140 @@ func TestInboundRegistryExpiry(t *testing.T) {
 	i.clock.Add(int64(time.Second))
 	i.inbound.expire()
 
-	if got := i.registered(); len(got) != 1 || !got[busy] {
-		t.Fatalf("want only the hash with a fetch in flight to stay, got %v", got)
-	}
-
-	i.inbound.unclaim(claimed)
-	i.inbound.expire()
-
 	if len(i.registered()) != 0 {
-		t.Fatal("the hash stayed after its fetch ended")
+		t.Fatalf("want both hashes expired, got %v", i.registered())
 	}
 
-	if got := hashCount(t, i.crawler, sourceInboundPeer, "expired"); got != 2 {
-		t.Fatalf("want 2 expired hashes, got %v", got)
+	if !i.inbound.take(claimed) || i.inbound.take(claimed) {
+		t.Fatal("a fetch in flight at the deadline must still deliver, once")
 	}
 
-	stops := 0
+	i.join(closed, 5)
+	i.join(fetched, 5)
 
-	for {
-		job, ok := i.scraper.nextAnnounce(0)
-		if !ok {
-			break
+	inFlight, _ := i.inbound.claim(closed, false)
+
+	i.inbound.release(closed, "released_closed_swarm")
+	i.inbound.release(protocol.ID{0xee}, "released_closed_swarm")
+	i.inbound.fetchedOutgoing(fetched)
+
+	if i.inbound.take(inFlight) || len(i.registered()) != 0 {
+		t.Fatal("a released hash must not be delivered")
+	}
+
+	if stops := i.stops(); len(stops) != 4 {
+		t.Fatalf("want one stop per membership, got %v", stops)
+	}
+
+	for stage, want := range map[string]float64{
+		stageInboundExpired:     2,
+		"released_closed_swarm": 1,
+		stageInboundFetchedOut:  1,
+		"outgoing_failed":       1,
+	} {
+		if got := hashCount(t, i.crawler, sourceInboundPeer, stage); got != want {
+			t.Errorf("stage %s: want %v, got %v", stage, want, got)
 		}
-
-		if job.stop {
-			stops++
-		}
-	}
-
-	if stops != 1 {
-		t.Fatalf("want a stopped announce for the one swarm that was joined, got %d", stops)
 	}
 }
 
-func TestHoldAnnouncesKeepTheSeederPriority(t *testing.T) {
+func TestAnnounceTokenBuysTwoPackets(t *testing.T) {
 	t.Parallel()
 
-	s := offlineScraper(2)
-	plain, many, some, elsewhere := protocol.ID{1}, protocol.ID{2}, protocol.ID{3}, protocol.ID{4}
+	s := offlineScraper(1)
+	first, second := protocol.ID{1}, protocol.ID{2}
+	member, usual, held, another := protocol.ID{3}, protocol.ID{4}, protocol.ID{5}, protocol.ID{6}
 
-	s.hold(many)
+	s.cache.Add(first, trackerInfo{seeders: 40})
+	s.announces[0][0] <- first
+	s.announces[0][0] <- second
 
-	if s.holdableSeeders(many) != 0 || s.holdQueues != nil {
-		t.Fatal("holds must stay off until they are enabled")
-	}
-
-	s.cache.Add(many, trackerInfo{seeders: 25, seededBy: 0b01})
-	s.cache.Add(some, trackerInfo{seeders: 6, seededBy: 0b01})
-	s.cache.Add(elsewhere, trackerInfo{seeders: 30, seededBy: 0b10})
-	s.cache.Add(plain, trackerInfo{seeders: 40})
-	s.announces[0][0] <- plain
-	s.announces[0][1] <- plain
-
-	if job, ok := s.nextAnnounce(0); !ok || job.hash != plain || job.hold || job.stop || job.seeders != 40 {
-		t.Fatalf("without holds the queue must work as before, got %+v", job)
-	}
-
-	s.announces[0][0] <- plain
-
-	if !s.enableHolds(protocol.ID{0xaa}, 3334) || s.holdParams.Port != 3334 || s.holdParams.NumWant != 0 {
-		t.Fatalf("holds did not turn on: %+v", s.holdParams)
-	}
-
-	s.hold(some)
-	s.hold(many)
-	s.hold(elsewhere)
-	s.hold(protocol.ID{0xff})
-
-	type step struct {
-		hash protocol.ID
-		hold bool
-	}
-
-	for n, want := range []step{{plain, false}, {many, true}, {plain, false}, {some, true}} {
-		job, ok := s.nextAnnounce(0)
-		if !ok || job.hash != want.hash || job.hold != want.hold || job.stop {
-			t.Fatalf("step %d: want %+v, got %+v", n, want, job)
+	for n, want := range []protocol.ID{first, second} {
+		jobs := s.spendToken(0)
+		if len(jobs) != 1 || jobs[0].hash != want || jobs[0].hold || jobs[0].stop {
+			t.Fatalf("token %d without the feature: want the usual announce alone, got %+v", n, jobs)
 		}
 	}
 
-	if job, ok := s.nextAnnounce(0); ok {
-		t.Fatalf("tracker 0 saw no seeders for the last hash, got %+v", job)
+	if jobs := s.spendToken(0); len(jobs) != 0 || s.stops != nil {
+		t.Fatalf("want an idle token, got %+v", jobs)
 	}
 
-	s.release(elsewhere)
+	verdicts := map[protocol.ID]joinVerdict{member: joinMember, usual: joinNone, held: joinHeld, another: joinMember}
 
-	if job, ok := s.nextAnnounce(1); ok {
-		t.Fatalf("a hold released before it was sent must be dropped without a stop, got %+v", job)
+	if !s.enableHolds(protocol.ID{0xaa}, 3334, 8, func(_ *trackerScraper, _ int, hash protocol.ID, _ uint32) joinVerdict {
+		return verdicts[hash]
+	}) {
+		t.Fatal("holds did not turn on")
 	}
 
-	s.release(many)
-	s.release(many)
-
-	if job, ok := s.nextAnnounce(0); !ok || job.hash != many || !job.stop || job.hold {
-		t.Fatalf("want one stop for the released swarm, got %+v", job)
+	if s.holdParams.Port != 3334 || s.holdParams.NumWant != trackerAnnounceNumWant || s.holdParams.PeerID != (protocol.ID{0xaa}) {
+		t.Fatalf("membership announces must carry the listener port and the usual numwant: %+v", s.holdParams)
 	}
 
-	if job, ok := s.nextAnnounce(0); ok {
-		t.Fatalf("want nothing after the stop, got %+v", job)
+	for _, hash := range []protocol.ID{member, usual, held, another} {
+		s.announces[0][1] <- hash
+	}
+
+	stop := func(n byte) protocol.ID { return protocol.ID{0x50, n} }
+
+	for n := range byte(5) {
+		s.stops[0] <- stop(n)
+	}
+
+	for n, want := range [][]announceJob{
+		{{hash: member, hold: true}, {hash: stop(0), stop: true}},
+		{{hash: usual}},
+		{{hash: another, hold: true}, {hash: stop(1), stop: true}},
+		{{hash: stop(2), stop: true}, {hash: stop(3), stop: true}},
+		{{hash: stop(4), stop: true}},
+		{},
+	} {
+		jobs := s.spendToken(0)
+		packets := 0
+
+		for _, job := range jobs {
+			if !job.hold && !job.stop {
+				packets++
+			}
+
+			packets++
+		}
+
+		if len(jobs) != len(want) || packets > announceTokenPackets {
+			t.Fatalf("token %d: want %+v, got %+v", n, want, jobs)
+		}
+
+		for k := range want {
+			if jobs[k] != want[k] {
+				t.Fatalf("token %d: want %+v, got %+v", n, want, jobs)
+			}
+		}
+	}
+
+	s.markHeld(member, 0)
+	s.release(member)
+	s.release(member)
+	s.release(usual)
+
+	if len(s.stops[0]) != 1 || <-s.stops[0] != member || s.holding(member) {
+		t.Fatal("want one stop for the one membership that was released")
+	}
+
+	for n := range byte(9) {
+		s.markHeld(stop(n), 0)
+		s.release(stop(n))
+	}
+
+	if len(s.stops[0]) != 8 {
+		t.Fatalf("a full stop queue must drop, not block: %d queued", len(s.stops[0]))
 	}
 
 	var off *trackerScraper
 
-	off.hold(many)
-	off.release(many)
+	off.release(member)
 
-	if off.enableHolds(protocol.ID{}, 1) || off.holdableSeeders(many) != 0 {
+	if off.enableHolds(protocol.ID{}, 1, 1, nil) {
 		t.Fatal("a scraper that is off must not hold anything")
 	}
 }
@@ -433,12 +508,11 @@ func TestInboundFetchReachesPersistence(t *testing.T) {
 		i := newInboundTest(t, inboundConfig{maxHashes: 10, hold: time.Minute, maxConns: 4}, offlineScraper(1))
 		metadata, hash := inboundMetadata(t, "incoming "+name)
 
-		i.inbound.register(i.seed(hash, 7, 1))
-
-		if job, ok := i.scraper.nextAnnounce(0); !ok || !job.hold || job.hash != hash {
-			t.Fatalf("%s: want a hold announce for the hash, got %+v", name, job)
+		if i.join(hash, 7) != joinMember {
+			t.Fatalf("%s: the hash was not held", name)
 		}
 
+		i.inbound.outgoingFailed(sampleRequest(hash))
 		i.clock.Add(int64(42 * time.Second))
 
 		seen, err := peertest.Peer{InfoHash: hash, Metadata: metadata, Encrypted: encrypted}.Dial(i.address())
@@ -467,8 +541,8 @@ func TestInboundFetchReachesPersistence(t *testing.T) {
 			t.Fatalf("%s: fetched %v, still registered %v", name, i.fetched.test(hash), i.registered())
 		}
 
-		if job, ok := i.scraper.nextAnnounce(0); !ok || !job.stop || job.hash != hash {
-			t.Fatalf("%s: want a stopped announce after the fetch, got %+v", name, job)
+		if stops := i.stops(); len(stops) != 1 || stops[0] != hash {
+			t.Fatalf("%s: want one stopped announce after the fetch, got %v", name, stops)
 		}
 
 		result := "ok"
@@ -481,6 +555,8 @@ func TestInboundFetchReachesPersistence(t *testing.T) {
 		for stage, want := range map[string]float64{
 			stageInboundRegistered:            1,
 			stageInboundConnAccepted:          1,
+			stageInboundActiveConn:            1,
+			"outgoing_failed":                 1,
 			stageMetaInfoOK:                   1,
 			stageMetaInfoOK + "_5_19":         1,
 			stageMetaInfoOK + "_wait_seconds": 42,
@@ -494,7 +570,7 @@ func TestInboundFetchReachesPersistence(t *testing.T) {
 
 		late := peertest.Peer{InfoHash: hash, Metadata: metadata, Encrypted: encrypted}
 		if _, err = late.Dial(i.address()); err == nil {
-			t.Fatalf("%s: a hash that is no longer registered was answered", name)
+			t.Fatalf("%s: a hash that is no longer wanted was answered", name)
 		}
 
 		eventually(t, name+" unknown hash", func() bool {
@@ -511,7 +587,7 @@ func TestInboundRefusesWhatItCannotUse(t *testing.T) {
 	metadata, hash := inboundMetadata(t, "wanted")
 	forged, stranger := inboundMetadata(t, "forged")
 
-	i.inbound.register(i.seed(hash, 7, 1))
+	i.join(hash, 7)
 
 	for _, test := range []struct {
 		name   string
@@ -620,12 +696,12 @@ func TestInboundConnectionCaps(t *testing.T) {
 	eventually(t, "the slot to free up", func() bool { return len(i.inbound.slots) == 0 })
 
 	metadata, hash := inboundMetadata(t, "busy")
-	i.inbound.register(i.seed(hash, 7, 1))
+	i.join(hash, 7)
 
 	claims := make([]*inboundEntry, 0, inboundConnsPerHash)
 
 	for range inboundConnsPerHash {
-		entry, _ := i.inbound.claim(hash)
+		entry, _ := i.inbound.claim(hash, false)
 		claims = append(claims, entry)
 	}
 
@@ -649,7 +725,7 @@ func TestInboundBannedAndPanickingChecks(t *testing.T) {
 	i.banningChecker = banAll{}
 
 	metadata, hash := inboundMetadata(t, "banned")
-	i.inbound.register(i.seed(hash, 7, 1))
+	i.join(hash, 7)
 
 	_, _ = peertest.Peer{InfoHash: hash, Metadata: metadata}.Dial(i.address())
 
@@ -667,7 +743,7 @@ func TestInboundBannedAndPanickingChecks(t *testing.T) {
 	j := newInboundTest(t, inboundConfig{maxHashes: 10, hold: time.Minute, maxConns: 4}, offlineScraper(1))
 	j.banningChecker = panicking{}
 
-	j.inbound.register(j.seed(hash, 7, 1))
+	j.join(hash, 7)
 
 	_, _ = peertest.Peer{InfoHash: hash, Metadata: metadata}.Dial(j.address())
 
@@ -676,7 +752,7 @@ func TestInboundBannedAndPanickingChecks(t *testing.T) {
 	})
 	j.nothingPersisted(t)
 
-	if entry, _ := j.inbound.claim(hash); entry == nil || entry.active != 1 {
+	if entry, _ := j.inbound.claim(hash, false); entry == nil || entry.active != 1 {
 		t.Fatalf("a panic must give the claim on the hash back, got %+v", entry)
 	}
 }
@@ -759,7 +835,7 @@ func TestInboundDHTAnnounce(t *testing.T) {
 	off := newClient()
 	i := start(off, config)
 
-	i.inbound.register(i.seed(hash, 7, 1))
+	i.join(hash, 7)
 
 	if i.inbound.dhtQueue != nil || len(i.registered()) != 1 {
 		t.Fatal("without the switch nothing may be queued for the DHT")
@@ -769,7 +845,7 @@ func TestInboundDHTAnnounce(t *testing.T) {
 	on := newClient()
 	i = start(on, config)
 
-	i.inbound.register(i.seed(hash, 7, 1))
+	i.join(hash, 7)
 
 	eventually(t, "the DHT announce", func() bool {
 		return hashCount(t, i.crawler, sourceInboundPeer, "dht_announced") == 1
@@ -805,7 +881,7 @@ func TestInboundDHTAnnounce(t *testing.T) {
 	i = start(silent, config)
 	silent.nodes = map[netip.AddrPort]protocol.ID{}
 
-	i.inbound.register(i.seed(hash, 7, 1))
+	i.join(hash, 7)
 
 	eventually(t, "the failed DHT announce", func() bool {
 		return hashCount(t, i.crawler, sourceInboundPeer, "dht_announce_failed") == 1
@@ -813,11 +889,12 @@ func TestInboundDHTAnnounce(t *testing.T) {
 }
 
 type heldAnnounce struct {
-	event uint32
-	hash  protocol.ID
-	left  uint64
-	port  uint16
-	at    time.Time
+	event   uint32
+	hash    protocol.ID
+	left    uint64
+	port    uint16
+	numWant uint32
+	at      time.Time
 }
 
 func fakeHoldTracker(t *testing.T) (string, chan heldAnnounce, *atomic.Int64) {
@@ -857,16 +934,17 @@ func fakeHoldTracker(t *testing.T) (string, chan heldAnnounce, *atomic.Int64) {
 				binary.BigEndian.PutUint32(response[0:4], 2)
 
 				for at := 16; at+20 <= n; at += 20 {
-					response = binary.BigEndian.AppendUint32(response, uint32(packet[at]))
+					response = binary.BigEndian.AppendUint32(response, uint32(packet[at])+1)
 					response = append(response, make([]byte, 8)...)
 				}
 			case action == 1 && n == 98:
 				seen := heldAnnounce{
-					event: binary.BigEndian.Uint32(packet[80:84]),
-					hash:  protocol.ID(packet[16:36]),
-					left:  binary.BigEndian.Uint64(packet[64:72]),
-					port:  binary.BigEndian.Uint16(packet[96:98]),
-					at:    time.Now(),
+					event:   binary.BigEndian.Uint32(packet[80:84]),
+					hash:    protocol.ID(packet[16:36]),
+					left:    binary.BigEndian.Uint64(packet[64:72]),
+					port:    binary.BigEndian.Uint16(packet[96:98]),
+					numWant: binary.BigEndian.Uint32(packet[92:96]),
+					at:      time.Now(),
 				}
 				announces <- seen
 
@@ -876,6 +954,7 @@ func fakeHoldTracker(t *testing.T) (string, chan heldAnnounce, *atomic.Int64) {
 
 				binary.BigEndian.PutUint32(response[0:4], 1)
 				response = append(response, make([]byte, 12)...)
+				response = append(response, 192, 0, 2, 1, 0x1a, 0xe1)
 
 				if delay := time.Duration(startedDelay.Load()); delay > 0 {
 					go func() {
@@ -897,34 +976,69 @@ func fakeHoldTracker(t *testing.T) (string, chan heldAnnounce, *atomic.Int64) {
 	return conn.LocalAddr().String(), announces, startedDelay
 }
 
-func nextAnnounce(t *testing.T, announces chan heldAnnounce) heldAnnounce {
-	t.Helper()
-
-	select {
-	case seen := <-announces:
-		return seen
-	case <-time.After(5 * time.Second):
-		t.Fatal("the tracker saw no announce")
-
-		return heldAnnounce{}
-	}
-}
-
-func TestInboundSwitchAndTrackerHold(t *testing.T) {
+func TestInboundSwitchAndTrackerMembership(t *testing.T) {
 	address, announces, startedDelay := fakeHoldTracker(t)
 
 	t.Setenv("BITMAGNET_TRACKERS", address)
 	t.Setenv("BITMAGNET_TRACKER_ANNOUNCE", "")
 	t.Setenv("BITMAGNET_TRACKER_ANNOUNCE_PORT", "")
+	t.Setenv("BITMAGNET_TRACKER_ANNOUNCE_PPS", "")
+	t.Setenv("BITMAGNET_INBOUND_MAX_HASHES", "")
+	t.Setenv("BITMAGNET_INBOUND_DHT", "")
 
 	receiver := metainforequester.NewReceiver(protocol.RandomPeerID(), 2*time.Second)
 	metadata, hash := inboundMetadata(t, "held")
-	hash2 := protocol.ID{9, 9, 9}
+	expiring, closed, late := protocol.ID{9, 9, 9}, protocol.ID{8, 8, 8}, protocol.ID{7, 7, 7}
+	fed := make(chan protocol.ID, 16)
+
+	next := func(event uint32, wanted protocol.ID, port uint16) heldAnnounce {
+		t.Helper()
+
+		select {
+		case seen := <-announces:
+			if seen.event != event || seen.hash != wanted || seen.port != port {
+				t.Fatalf("want event %d for %s from port %d, got %+v", event, wanted, port, seen)
+			}
+
+			return seen
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the tracker saw no event %d for %s", event, wanted)
+
+			return heldAnnounce{}
+		}
+	}
+
+	peersFed := func(wanted protocol.ID) {
+		t.Helper()
+
+		select {
+		case got := <-fed:
+			if got != wanted {
+				t.Fatalf("peers of %s were handed on, want %s", got, wanted)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the peers of %s never reached the outgoing path", wanted)
+		}
+	}
+
+	quiet := func(what string) {
+		t.Helper()
+
+		select {
+		case seen := <-announces:
+			t.Fatalf("%s: unexpected announce %+v", what, seen)
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
 
 	newCrawler := func() (*crawler, context.CancelFunc) {
 		scraper, err := newTrackerScraper(newTrackerMetrics(), "udp4")
 		if err != nil {
 			t.Fatal(err)
+		}
+
+		scraper.onPeers = func(_ context.Context, hash protocol.ID, _ string, _ []netip.AddrPort) {
+			fed <- hash
 		}
 
 		c := newTestCrawler(nil, nil)
@@ -944,89 +1058,87 @@ func TestInboundSwitchAndTrackerHold(t *testing.T) {
 		return c, cancel
 	}
 
-	scrapeAndAnnounce := func(c *crawler, wanted protocol.ID) {
-		c.trackers.submit(wanted)
-
-		for _, event := range []uint32{2, 3} {
-			if seen := nextAnnounce(t, announces); seen.event != event || seen.hash != wanted || seen.port != 6881 {
-				t.Fatalf("want the usual announce event %d from port 6881, got %+v", event, seen)
-			}
-		}
+	sent := func(c *crawler, kind string) float64 {
+		return counterValue(t, c.trackers.metrics.sent, map[string]string{"kind": kind})
 	}
 
 	for _, value := range []string{"", "off", "1"} {
 		t.Setenv("BITMAGNET_INBOUND_PEERS", value)
 
 		c, cancel := newCrawler()
-		if c.inbound != nil || c.trackers.holdQueues != nil {
+		if c.inbound != nil || c.trackers.stops != nil || c.trackers.join != nil {
 			t.Fatalf("BITMAGNET_INBOUND_PEERS=%q must leave the feature off", value)
 		}
 
-		scrapeAndAnnounce(c, hash)
-		c.inbound.register(nodeHasPeersForHash{infoHash: hash, source: sourceSample})
-		c.inbound.fetchedOutgoing(hash)
+		c.trackers.submit(hash)
 
-		select {
-		case seen := <-announces:
-			t.Fatalf("BITMAGNET_INBOUND_PEERS=%q: unexpected announce %+v", value, seen)
-		case <-time.After(200 * time.Millisecond):
+		if seen := next(2, hash, 6881); seen.numWant != trackerAnnounceNumWant {
+			t.Fatalf("usual announce: numwant %d", seen.numWant)
+		}
+
+		next(3, hash, 6881)
+		peersFed(hash)
+
+		c.inbound.outgoingFailed(sampleRequest(hash))
+		c.inbound.release(hash, "released_closed_swarm")
+		c.inbound.fetchedOutgoing(hash)
+		quiet("feature off")
+
+		if sent(c, tracker.SentStarted) != 1 || sent(c, tracker.SentStopped) != 1 || sent(c, tracker.SentScrape) != 1 {
+			t.Fatalf("feature off: want one scrape, one started and one stopped packet")
 		}
 
 		cancel()
 	}
 
 	t.Setenv("BITMAGNET_INBOUND_PEERS", "on")
-	t.Setenv("BITMAGNET_INBOUND_MAX_HASHES", "7")
 	t.Setenv("BITMAGNET_INBOUND_HOLD_SECONDS", "1")
 	t.Setenv("BITMAGNET_INBOUND_MAX_CONNS", "3")
-	t.Setenv("BITMAGNET_INBOUND_DHT", "")
 
 	c, _ := newCrawler()
 	if c.inbound == nil {
 		t.Fatal("BITMAGNET_INBOUND_PEERS=on must start the listener")
 	}
 
-	if got := c.inbound.config; got != (inboundConfig{maxHashes: 7, hold: time.Second, maxConns: 3}) {
-		t.Fatalf("got config %+v", got)
+	if got := c.inbound.config; got != (inboundConfig{maxHashes: 60, hold: time.Second, maxConns: 3}) {
+		t.Fatalf("want room for two trackers announcing 30 hashes a second for the hold of one second, got %+v", got)
 	}
 
 	port := listenerPort(c.inbound.listeners[0])
+	submitted := time.Now()
 
-	scrapeAndAnnounce(c, hash)
-	scrapeAndAnnounce(c, hash2)
+	c.trackers.submit(expiring)
 
-	registeredAt := time.Now()
-
-	c.inbound.register(nodeHasPeersForHash{infoHash: hash2, source: sourceSample})
-
-	if seen := nextAnnounce(t, announces); seen.event != 2 || seen.hash != hash2 || seen.port != port || seen.left == 0 {
-		t.Fatalf("want a started announce as a leecher on the listener port %d, got %+v", port, seen)
+	if seen := next(2, expiring, port); seen.numWant != trackerAnnounceNumWant || seen.left == 0 {
+		t.Fatalf("the usual announce must be the start of the membership: %+v", seen)
 	}
 
-	seen := nextAnnounce(t, announces)
-	if seen.event != 3 || seen.hash != hash2 || seen.port != port {
-		t.Fatalf("want a stopped announce when the hold expires, got %+v", seen)
+	peersFed(expiring)
+
+	if !c.inbound.wanted(expiring) {
+		t.Fatal("the hash must be registered by the time its announce is out")
 	}
 
-	if held := seen.at.Sub(registeredAt); held < time.Second {
+	c.inbound.outgoingFailed(sampleRequest(expiring))
+
+	if held := next(3, expiring, port).at.Sub(submitted); held < time.Second {
 		t.Fatalf("the swarm was left after %s, before the hold of one second ended", held)
 	}
 
+	c.inbound.mu.Lock()
 	c.inbound.config.hold = time.Minute
-	c.inbound.register(nodeHasPeersForHash{infoHash: hash, source: sourceSample})
+	c.inbound.mu.Unlock()
 
-	if seen := nextAnnounce(t, announces); seen.event != 2 || seen.hash != hash || seen.port != port {
-		t.Fatalf("want a started announce for the second hash, got %+v", seen)
-	}
+	c.trackers.submit(hash)
+	next(2, hash, port)
+	peersFed(hash)
 
 	seeder := peertest.Peer{InfoHash: hash, Metadata: metadata}
 	if _, err := seeder.Dial(fmt.Sprintf("127.0.0.1:%d", port)); err != nil {
 		t.Fatal(err)
 	}
 
-	if seen := nextAnnounce(t, announces); seen.event != 3 || seen.hash != hash || seen.port != port {
-		t.Fatalf("want a stopped announce once the meta info arrived, got %+v", seen)
-	}
+	next(3, hash, port)
 
 	select {
 	case batch := <-c.persistTorrents.Out():
@@ -1037,32 +1149,35 @@ func TestInboundSwitchAndTrackerHold(t *testing.T) {
 		t.Fatal("nothing reached persistence")
 	}
 
-	hash3 := protocol.ID{7, 7, 7}
+	c.trackers.submit(closed)
+	next(2, closed, port)
+	peersFed(closed)
+	c.inbound.release(closed, "released_closed_swarm")
+	next(3, closed, port)
 
-	scrapeAndAnnounce(c, hash3)
 	startedDelay.Store(int64(300 * time.Millisecond))
-	c.inbound.register(nodeHasPeersForHash{infoHash: hash3, source: sourceSample})
-
-	if seen := nextAnnounce(t, announces); seen.event != 2 || seen.hash != hash3 {
-		t.Fatalf("want a started announce for the third hash, got %+v", seen)
-	}
-
-	c.inbound.fetchedOutgoing(hash3)
-
-	for n := range 2 {
-		if seen := nextAnnounce(t, announces); seen.event != 3 || seen.hash != hash3 {
-			t.Fatalf("stop %d of a swarm left while its start was unanswered: got %+v", n, seen)
-		}
-	}
-
+	c.trackers.submit(late)
+	next(2, late, port)
+	c.inbound.fetchedOutgoing(late)
+	next(3, late, port)
+	next(3, late, port)
+	peersFed(late)
 	startedDelay.Store(0)
+	quiet("after the last membership")
+
+	if sent(c, tracker.SentStarted) != 4 || sent(c, tracker.SentStopped) != 5 {
+		t.Fatalf("want one started and one stopped per hash plus the second stop after the late start, got %v and %v",
+			sent(c, tracker.SentStarted), sent(c, tracker.SentStopped))
+	}
 
 	for stage, want := range map[string]float64{
-		stageInboundRegistered: 3,
-		"announced":            2,
-		"expired":              1,
-		"fetched_outgoing":     1,
-		stageMetaInfoOK:        1,
+		stageInboundRegistered:  4,
+		"announced":             3,
+		"outgoing_failed":       1,
+		stageInboundExpired:     1,
+		stageInboundFetchedOut:  1,
+		"released_closed_swarm": 1,
+		stageMetaInfoOK:         1,
 	} {
 		if got := hashCount(t, c, sourceInboundPeer, stage); got != want {
 			t.Errorf("stage %s: want %v, got %v", stage, want, got)
@@ -1081,7 +1196,7 @@ func TestInboundSwitchAndTrackerHold(t *testing.T) {
 	busy.trackers = offlineScraper(1)
 	busy.setupInboundPeers(receiver, listenerPort(taken))
 
-	if busy.inbound != nil || busy.trackers.holdQueues != nil {
+	if busy.inbound != nil || busy.trackers.stops != nil {
 		t.Fatal("a taken port must leave the feature off")
 	}
 

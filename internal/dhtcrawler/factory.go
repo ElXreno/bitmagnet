@@ -60,6 +60,7 @@ type Result struct {
 	TrackerPackets prometheus.Collector `group:"prometheus_collectors"`
 	TrackerHashes  prometheus.Collector `group:"prometheus_collectors"`
 	TrackerOutcome prometheus.Collector `group:"prometheus_collectors"`
+	TrackerSent    prometheus.Collector `group:"prometheus_collectors"`
 }
 
 func New(params Params) Result {
@@ -306,6 +307,7 @@ func New(params Params) Result {
 		TrackerPackets:   trackerMetrics.packets,
 		TrackerHashes:    trackerMetrics.hashes,
 		TrackerOutcome:   trackerMetrics.outcome,
+		TrackerSent:      trackerMetrics.sent,
 		DhtCrawlerActive: active,
 	}
 }

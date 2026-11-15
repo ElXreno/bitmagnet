@@ -52,6 +52,7 @@ type trackerMetrics struct {
 	packets *prometheus.CounterVec
 	hashes  *prometheus.CounterVec
 	outcome *prometheus.CounterVec
+	sent    *prometheus.CounterVec
 }
 
 func newTrackerMetrics() trackerMetrics {
@@ -74,6 +75,12 @@ func newTrackerMetrics() trackerMetrics {
 			Name:      "tracker_outcome_total",
 			Help:      "A counter of info hashes by what the trackers said about the swarm and how the meta info fetch ended.",
 		}, []string{"swarm", "outcome"}),
+		sent: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "bitmagnet",
+			Subsystem: "dht_crawler",
+			Name:      "tracker_sent_total",
+			Help:      "A counter of UDP packets sent to trackers by kind: connect, scrape, started, stopped.",
+		}, []string{"tracker", "kind"}),
 	}
 }
 
@@ -100,8 +107,8 @@ func announcePriority(seeders uint32) int {
 	}
 }
 
-// trackerScraper asks public UDP trackers about the swarms of info hashes in batches (BEP 15 scrape).
-// It only reads swarm sizes: it never announces, so the crawler does not show up in any swarm.
+// trackerScraper asks public UDP trackers about the swarms of info hashes in batches (BEP 15 scrape) and
+// announces the seeded ones to take their peers.
 type trackerScraper struct {
 	client           *tracker.Client
 	limiters         []*rate.Limiter
@@ -111,10 +118,11 @@ type trackerScraper struct {
 	announceLimiters []*rate.Limiter
 	announceParams   tracker.AnnounceParams
 	onPeers          func(ctx context.Context, hash protocol.ID, source string, peers []netip.AddrPort)
-	holdQueues       [][announcePriorities]chan holdJob
+	stops            []chan protocol.ID
 	holdParams       tracker.AnnounceParams
 	holdMu           sync.Mutex
-	held             map[protocol.ID]heldSwarm
+	held             map[protocol.ID]int
+	join             joinFunc
 	onHeld           func(hash protocol.ID)
 	prefix           string
 	hosts            []string
@@ -153,6 +161,10 @@ func newTrackerScraper(metrics trackerMetrics, network string) (*trackerScraper,
 	labels := make([]string, len(hosts))
 	for i, host := range hosts {
 		labels[i] = host + suffix
+	}
+
+	client.OnSend = func(index int, kind string) {
+		metrics.sent.With(prometheus.Labels{"tracker": labels[index], "kind": kind}).Inc()
 	}
 
 	scraper := &trackerScraper{
@@ -419,26 +431,21 @@ func (c *crawler) unseeded(hash protocol.ID) bool {
 }
 
 type announceJob struct {
-	hash     protocol.ID
-	seeders  uint32
-	priority int
-	hold     bool
-	stop     bool
+	hash    protocol.ID
+	seeders uint32
+	hold    bool
+	stop    bool
 }
 
 // nextAnnounce pops the queued hash with the most seeders for tracker number index.
 func (s *trackerScraper) nextAnnounce(index int) (announceJob, bool) {
-	for priority, queue := range s.announces[index] {
+	for _, queue := range s.announces[index] {
 		select {
 		case hash := <-queue:
 			info, _ := s.cache.Get(hash)
 
 			return announceJob{hash: hash, seeders: info.seeders}, true
 		default:
-		}
-
-		if job, ok := s.nextHold(index, priority); ok {
-			return job, true
 		}
 	}
 
@@ -453,8 +460,8 @@ func (s *trackerScraper) runAnnounces(ctx context.Context, index int) {
 			return
 		}
 
-		job, ok := s.nextAnnounce(index)
-		if !ok {
+		jobs := s.spendToken(index)
+		if len(jobs) == 0 {
 			select {
 			case <-ctx.Done():
 				return
@@ -464,13 +471,15 @@ func (s *trackerScraper) runAnnounces(ctx context.Context, index int) {
 			continue
 		}
 
-		switch {
-		case job.stop:
-			go s.announceStop(ctx, index, host, job.hash)
-		case job.hold:
-			go s.announceHold(ctx, index, host, job)
-		default:
-			go s.announce(ctx, index, host, job.hash, job.seeders)
+		for _, job := range jobs {
+			switch {
+			case job.stop:
+				go s.announceStop(ctx, index, job.hash)
+			case job.hold:
+				go s.announceMember(ctx, index, host, job)
+			default:
+				go s.announce(ctx, index, host, job.hash, job.seeders)
+			}
 		}
 	}
 }
@@ -478,20 +487,7 @@ func (s *trackerScraper) runAnnounces(ctx context.Context, index int) {
 func (s *trackerScraper) announce(ctx context.Context, index int, host string, hash protocol.ID, seeders uint32) {
 	result, err := s.client.Announce(ctx, index, hash, s.announceParams)
 
-	switch {
-	case err == nil && len(result.Peers) > 0:
-		s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_ok"}).Inc()
-
-		if s.onPeers != nil {
-			s.onPeers(ctx, hash, s.prefix+trackerSource(seeders), result.Peers)
-		}
-	case err == nil:
-		s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_no_peers"}).Inc()
-	case errors.Is(err, tracker.ErrTimeout):
-		s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_timeout"}).Inc()
-	default:
-		s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_error"}).Inc()
-	}
+	s.announced(ctx, host, hash, seeders, result.Peers, err)
 }
 
 func trackerSource(seeders uint32) string {

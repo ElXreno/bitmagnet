@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/netip"
-	"sync"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
@@ -37,40 +36,67 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 	})
 }
 
+const metaInfoParallelDials = 4
+
 func (c *crawler) doRequestMetaInfo(
 	ctx context.Context,
 	source string,
 	hash protocol.ID,
 	peers []netip.AddrPort,
 ) (metainforequester.Response, error) {
-	var errs []error
-
-	errsMutex := sync.Mutex{}
-	addErr := func(err error) {
-		errsMutex.Lock()
-		errs = append(errs, err)
-		errsMutex.Unlock()
+	type dialResult struct {
+		res metainforequester.Response
+		err error
 	}
 
-	for _, p := range peers {
-		res, err := c.metainfoRequester.Request(ctx, hash, p)
-		result := classifyDialError(err)
-		if err == nil && res.Encrypted {
+	dialCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	results := make(chan dialResult, len(peers))
+	next := 0
+	inflight := 0
+
+	var errs []error
+
+	for {
+		for inflight < metaInfoParallelDials && next < len(peers) {
+			p := peers[next]
+			next++
+			inflight++
+
+			go func() {
+				res, err := c.metainfoRequester.Request(dialCtx, hash, p)
+				results <- dialResult{res: res, err: err}
+			}()
+		}
+
+		if inflight == 0 {
+			break
+		}
+
+		r := <-results
+		inflight--
+
+		result := classifyDialError(r.err)
+		if r.err == nil && r.res.Encrypted {
 			result = "ok_mse"
 		}
 
 		c.dialsTotal.With(prometheus.Labels{"source": source, "result": result}).Inc()
-		if err != nil {
-			addErr(err)
+
+		if r.err != nil {
+			errs = append(errs, r.err)
+
 			continue
 		}
 
-		if banErr := c.banningChecker.Check(res.Info); banErr != nil {
+		if banErr := c.banningChecker.Check(r.res.Info); banErr != nil {
 			_ = c.blockingManager.Block(ctx, []protocol.ID{hash}, false)
+
 			return metainforequester.Response{}, errors.Join(errBanned, banErr)
 		}
 
-		return res, nil
+		return r.res, nil
 	}
 
 	return metainforequester.Response{}, errors.Join(errs...)

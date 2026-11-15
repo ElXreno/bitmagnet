@@ -137,7 +137,7 @@ func New(params Params) Result {
 							10*scalingFactor, 20*scalingFactor),
 						requestMetaInfo: concurrency.NewBufferedConcurrentChannel[infoHashWithPeers](
 							10*scalingFactor,
-							60*scalingFactor,
+							20*scalingFactor,
 						),
 						persistTorrents: concurrency.NewBatchingChannel[infoHashWithMetaInfo](
 							1000,

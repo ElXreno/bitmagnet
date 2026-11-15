@@ -24,22 +24,9 @@ func (s *socket) Open(localAddr netip.AddrPort) error {
 		return addrErr
 	}
 
-	family := unix.AF_INET
-	if localAddr.Addr().Is6() {
-		family = unix.AF_INET6
-	}
-
-	fd, sockErr := unix.Socket(family, unix.SOCK_DGRAM, 0)
+	fd, sockErr := newSocketFD(localAddr.Addr().Is6())
 	if sockErr != nil {
-		return fmt.Errorf("error creating socket: %w", sockErr)
-	}
-
-	if family == unix.AF_INET6 {
-		if optErr := unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 1); optErr != nil {
-			_ = unix.Close(fd)
-
-			return fmt.Errorf("error setting IPV6_V6ONLY: %w", optErr)
-		}
+		return sockErr
 	}
 
 	if bindErr := unix.Bind(fd, sAddr); bindErr != nil {
@@ -51,6 +38,28 @@ func (s *socket) Open(localAddr netip.AddrPort) error {
 	s.fd = fd
 
 	return nil
+}
+
+func newSocketFD(ipv6 bool) (int, error) {
+	family := unix.AF_INET
+	if ipv6 {
+		family = unix.AF_INET6
+	}
+
+	fd, sockErr := unix.Socket(family, unix.SOCK_DGRAM, 0)
+	if sockErr != nil {
+		return -1, fmt.Errorf("error creating socket: %w", sockErr)
+	}
+
+	if ipv6 {
+		if optErr := unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 1); optErr != nil {
+			_ = unix.Close(fd)
+
+			return -1, fmt.Errorf("error setting IPV6_V6ONLY: %w", optErr)
+		}
+	}
+
+	return fd, nil
 }
 
 func (s *socket) Close() error {

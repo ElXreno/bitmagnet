@@ -11,42 +11,65 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestIPv6SocketIsV6Only(t *testing.T) {
+func socketOption(t *testing.T, fd int, level int, option int) int {
+	t.Helper()
+
+	value, err := unix.GetsockoptInt(fd, level, option)
+	require.NoError(t, err)
+
+	return value
+}
+
+func TestIPv6SocketIsV6OnlyBeforeBind(t *testing.T) {
 	t.Parallel()
 
-	s, ok := newSocket().(*socket)
-	require.True(t, ok)
-	require.NoError(t, s.Close())
-
-	if err := s.Open(netip.AddrPortFrom(netip.IPv6Loopback(), 0)); err != nil {
-		t.Skipf("no IPv6 loopback on this host: %s", err)
+	fd, err := newSocketFD(true)
+	if err != nil {
+		t.Skipf("no IPv6 sockets on this host: %s", err)
 	}
 
-	defer func() { _ = s.Close() }()
+	defer func() { _ = unix.Close(fd) }()
 
-	v6only, err := unix.GetsockoptInt(s.fd, unix.IPPROTO_IPV6, unix.IPV6_V6ONLY)
-	require.NoError(t, err)
-	assert.Equal(t, 1, v6only)
-
-	domain, err := unix.GetsockoptInt(s.fd, unix.SOL_SOCKET, unix.SO_DOMAIN)
-	require.NoError(t, err)
-	assert.Equal(t, unix.AF_INET6, domain)
+	assert.Equal(t, 1, socketOption(t, fd, unix.IPPROTO_IPV6, unix.IPV6_V6ONLY))
+	assert.Equal(t, unix.AF_INET6, socketOption(t, fd, unix.SOL_SOCKET, unix.SO_DOMAIN))
+	assert.Equal(t, unix.SOCK_DGRAM, socketOption(t, fd, unix.SOL_SOCKET, unix.SO_TYPE))
 }
 
 func TestIPv4SocketFamily(t *testing.T) {
 	t.Parallel()
 
-	s, ok := newSocket().(*socket)
+	fd, err := newSocketFD(false)
+	require.NoError(t, err)
+
+	defer func() { _ = unix.Close(fd) }()
+
+	assert.Equal(t, unix.AF_INET, socketOption(t, fd, unix.SOL_SOCKET, unix.SO_DOMAIN))
+	assert.Equal(t, unix.SOCK_DGRAM, socketOption(t, fd, unix.SOL_SOCKET, unix.SO_TYPE))
+}
+
+func TestSocketOpenByFamily(t *testing.T) {
+	t.Parallel()
+
+	unopened, ok := newSocket().(*socket)
 	require.True(t, ok)
-	require.NoError(t, s.Open(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), 0)))
+	require.NoError(t, unopened.Close())
 
-	defer func() { _ = s.Close() }()
+	s4, ok := newSocket().(*socket)
+	require.True(t, ok)
+	require.NoError(t, s4.Open(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), 0)))
 
-	domain, err := unix.GetsockoptInt(s.fd, unix.SOL_SOCKET, unix.SO_DOMAIN)
-	require.NoError(t, err)
-	assert.Equal(t, unix.AF_INET, domain)
+	defer func() { _ = s4.Close() }()
 
-	kind, err := unix.GetsockoptInt(s.fd, unix.SOL_SOCKET, unix.SO_TYPE)
-	require.NoError(t, err)
-	assert.Equal(t, unix.SOCK_DGRAM, kind)
+	assert.Equal(t, unix.AF_INET, socketOption(t, s4.fd, unix.SOL_SOCKET, unix.SO_DOMAIN))
+
+	s6, ok := newSocket().(*socket)
+	require.True(t, ok)
+
+	if err := s6.Open(netip.AddrPortFrom(netip.IPv6Loopback(), 0)); err != nil {
+		t.Skipf("no IPv6 loopback on this host: %s", err)
+	}
+
+	defer func() { _ = s6.Close() }()
+
+	assert.Equal(t, unix.AF_INET6, socketOption(t, s6.fd, unix.SOL_SOCKET, unix.SO_DOMAIN))
 }

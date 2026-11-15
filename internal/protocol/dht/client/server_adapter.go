@@ -10,6 +10,8 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/server"
 )
 
+var ErrScrapeNoFilter = errors.New("missing bloom filter in scrape response")
+
 type serverAdapter struct {
 	nodeID protocol.ID
 	server server.Server
@@ -107,7 +109,7 @@ func (a serverAdapter) GetPeersScrape(
 	}
 
 	if res.Msg.R.BFpe == nil || res.Msg.R.BFsd == nil {
-		return GetPeersScrapeResult{}, errors.New("missing bloom filter in scrape response")
+		return GetPeersScrapeResult{}, ErrScrapeNoFilter
 	}
 
 	return GetPeersScrapeResult{

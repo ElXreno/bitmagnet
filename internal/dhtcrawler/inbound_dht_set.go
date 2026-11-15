@@ -69,12 +69,13 @@ func (h *dhtHeld) request() nodeHasPeersForHash {
 
 // dhtHeldSet is a ring in arrival order with an index: O(1), oldest out first
 type dhtHeldSet struct {
-	onAdd func(protocol.ID)
-	slots []dhtHeld
-	head  int
-	used  int
-	ttl   uint32
-	index map[protocol.ID]uint32
+	onAdd  func(protocol.ID)
+	onDrop func(protocol.ID)
+	slots  []dhtHeld
+	head   int
+	used   int
+	ttl    uint32
+	index  map[protocol.ID]uint32
 }
 
 func newDHTHeldSet(capacity int, ttl time.Duration) *dhtHeldSet {
@@ -110,13 +111,19 @@ func (s *dhtHeldSet) pop() bool {
 	oldest := &s.slots[s.head]
 	live := oldest.live
 
+	hash := oldest.hash
+
 	if live {
-		delete(s.index, oldest.hash)
+		delete(s.index, hash)
 	}
 
 	*oldest = dhtHeld{}
 	s.head = (s.head + 1) % len(s.slots)
 	s.used--
+
+	if live && s.onDrop != nil {
+		s.onDrop(hash)
+	}
 
 	return live
 }
@@ -151,6 +158,10 @@ func (s *dhtHeldSet) remove(hash protocol.ID) bool {
 	if ok {
 		s.slots[slot].live = false
 		delete(s.index, hash)
+
+		if s.onDrop != nil {
+			s.onDrop(hash)
+		}
 	}
 
 	return ok

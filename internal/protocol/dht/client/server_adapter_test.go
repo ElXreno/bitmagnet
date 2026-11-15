@@ -167,3 +167,24 @@ func TestWithoutIPv6NoWantAndNodes6AreIgnored(t *testing.T) {
 		assert.Nil(t, args.Want)
 	}
 }
+
+func TestScrapeWithoutFiltersFailsWithTheSentinel(t *testing.T) {
+	t.Parallel()
+
+	addr := netip.MustParseAddrPort("192.0.2.1:6881")
+
+	for name, strip := range map[string]func(*dht.Return){
+		"no seeders": func(ret *dht.Return) { ret.BFsd = nil },
+		"no peers":   func(ret *dht.Return) { ret.BFpe = nil },
+	} {
+		s := newFakeServer(false)
+		strip(&s.ret)
+
+		_, err := serverAdapter{nodeID: protocol.ID{1}, server: s}.GetPeersScrape(context.Background(), addr, protocol.ID{7})
+		require.ErrorIs(t, err, ErrScrapeNoFilter, name)
+	}
+
+	_, err := serverAdapter{nodeID: protocol.ID{1}, server: newFakeServer(false)}.
+		GetPeersScrape(context.Background(), addr, protocol.ID{7})
+	require.NoError(t, err)
+}

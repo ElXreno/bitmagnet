@@ -50,6 +50,7 @@ type crawler struct {
 	trackers                     *trackerScraper
 	trackers6                    *trackerScraper
 	fetched                      *ignoreFilter
+	inDatabase                   func(context.Context, protocol.ID) bool
 	failed                       *failedHashes
 	failedSeeded                 *failedHashes
 	closedSwarms                 *failedHashes

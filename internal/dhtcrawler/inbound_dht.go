@@ -3,6 +3,7 @@ package dhtcrawler
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/bitmagnet-io/bitmagnet/internal/bloom"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/server"
 	"golang.org/x/time/rate"
 )
@@ -45,6 +47,7 @@ func (p *inboundPeers) enableDHT(v4 net.Listener, v6 net.Listener) {
 
 	p.dhtSet = newDHTHeldSet(p.config.dhtMax, p.config.dhtTTL)
 	p.dhtSet.onAdd = p.indexMSE
+	p.dhtSet.onDrop = p.unindexMSE
 	p.dhtJoins = make(chan nodeHasPeersForHash, 10*p.config.dhtPPS)
 	p.dhtLimiter = rate.NewLimiter(rate.Limit(p.config.dhtPPS), p.config.dhtPPS)
 	p.dhtLookups = make(chan struct{}, inboundDHTLookups)
@@ -83,6 +86,19 @@ func (p *inboundPeers) runDHT(ctx context.Context) {
 	}
 }
 
+// holdsNowhere says whether no registry entry, late entry or fetch record claims the hash; it needs mu
+func (p *inboundPeers) holdsNowhere(hash protocol.ID) bool {
+	if _, ok := p.entries[hash]; ok {
+		return false
+	}
+
+	if _, ok := p.late[hash]; ok {
+		return false
+	}
+
+	return !p.c.fetched.test(hash) && !p.c.closedSwarms.test(hash)
+}
+
 func (p *inboundPeers) held(hash protocol.ID) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -90,6 +106,20 @@ func (p *inboundPeers) held(hash protocol.ID) bool {
 	_, ok := p.entries[hash]
 
 	return ok
+}
+
+func (p *inboundPeers) markDHTAnnounced(hash protocol.ID) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	entry, ok := p.entries[hash]
+	if !ok {
+		entry, ok = p.late[hash]
+	}
+
+	if ok {
+		entry.dhtAnnounced = true
+	}
 }
 
 func (p *inboundPeers) lookupTokens(ctx context.Context, hash protocol.ID) []lookupToken {
@@ -147,6 +177,7 @@ func (p *inboundPeers) announceDHT(ctx context.Context, hash protocol.ID) {
 	p.c.countHash(sourceInboundPeer, "dht_announce_nodes", accepted)
 
 	if accepted > 0 {
+		p.markDHTAnnounced(hash)
 		p.c.countHash(sourceInboundPeer, "dht_announced", 1)
 	} else {
 		p.c.countHash(sourceInboundPeer, "dht_announce_failed", 1)
@@ -227,8 +258,19 @@ func (p *inboundPeers) joinDHT(ctx context.Context, req nodeHasPeersForHash) {
 	held.class = class
 
 	p.mu.Lock()
-	_, evicted := p.dhtSet.add(held)
+
+	stale := !p.holdsNowhere(req.infoHash)
+	evicted := false
+
+	if !stale {
+		_, evicted = p.dhtSet.add(held)
+	}
+
 	p.mu.Unlock()
+
+	if stale {
+		c.countHash(sourceInboundPeer, "dht_join_stale", 1)
+	}
 
 	if evicted {
 		c.countHash(sourceInboundPeer, "dht_evicted", 1)
@@ -268,7 +310,11 @@ func (p *inboundPeers) scrapeClass(ctx context.Context, hash protocol.ID, tokens
 	for range closest {
 		got := <-answers
 		if got.err != nil {
-			p.c.countHash(sourceInboundPeer, "dht_scrape_failed", 1)
+			if errors.Is(got.err, client.ErrScrapeNoFilter) {
+				p.c.countHash(sourceInboundPeer, "dht_scrape_no_filter", 1)
+			} else {
+				p.c.countHash(sourceInboundPeer, "dht_scrape_timeout", 1)
+			}
 
 			continue
 		}

@@ -1,6 +1,7 @@
 package dhtcrawler
 
 import (
+	"cmp"
 	"container/heap"
 	"container/list"
 	"context"
@@ -33,6 +34,12 @@ const (
 	stageInboundExpired        = "expired"
 	stageInboundFetchedOut     = "fetched_outgoing"
 	stageInboundUnknownHash    = "unknown_hash"
+	stageInboundUnknownKey     = "unknown_key"
+	stageInboundUnknownConn    = "unknown_conn"
+	stageInboundUnknownBusy    = "unknown_busy"
+	stageInboundUnknownDup     = "unknown_dup"
+	stageInboundUnknownKnown   = "unknown_known"
+	suffixInboundUnknown       = "_unknown"
 	stageInboundActiveConn     = "active_conn"
 	stageInboundLateConn       = "late_conn"
 	stageInboundDHTConn        = "dht_conn"
@@ -61,6 +68,7 @@ type inboundConfig struct {
 	dhtMax    int
 	dhtTTL    time.Duration
 	dhtSeeds  string
+	unknown   bool
 }
 
 func inboundConfigFromEnv() (inboundConfig, bool) {
@@ -91,6 +99,7 @@ func inboundConfigFromEnv() (inboundConfig, bool) {
 		dhtMax:    envInt("BITMAGNET_INBOUND_DHT_HASHES", 300_000),
 		dhtTTL:    time.Duration(envInt("BITMAGNET_INBOUND_DHT_SECONDS", 2700)) * time.Second,
 		dhtSeeds:  dhtSeedsFromEnv(),
+		unknown:   os.Getenv("BITMAGNET_INBOUND_UNKNOWN") == "on",
 	}, true
 }
 
@@ -104,23 +113,25 @@ func dhtSeedsFromEnv() string {
 }
 
 type inboundEntry struct {
-	hash      protocol.ID
-	req       nodeHasPeersForHash
-	seeders   uint32
-	seq       uint64
-	since     time.Time
-	deadline  time.Time
-	until     time.Time
-	elem      *list.Element
-	active    int
-	index     int
-	announced bool
-	failed    bool
-	extras    bool
-	late      bool
-	dht       bool
-	done      bool
-	class     uint8
+	hash         protocol.ID
+	req          nodeHasPeersForHash
+	seeders      uint32
+	seq          uint64
+	since        time.Time
+	deadline     time.Time
+	until        time.Time
+	elem         *list.Element
+	active       int
+	index        int
+	announced    bool
+	dhtAnnounced bool
+	failed       bool
+	extras       bool
+	late         bool
+	dht          bool
+	unknown      bool
+	done         bool
+	class        uint8
 }
 
 type inboundHeap []*inboundEntry
@@ -179,6 +190,9 @@ type inboundPeers struct {
 	mseIndex   *lru.LRU[metainforequester.MSEKey, protocol.ID]
 	seq        uint64
 	closing    bool
+
+	unknownActive int
+	unknownHashes map[protocol.ID]struct{}
 }
 
 func listenInbound(port uint16, logger *zap.SugaredLogger) (v4 net.Listener, v6 net.Listener) {
@@ -229,6 +243,8 @@ func (c *crawler) openInboundPeers(config inboundConfig, receiver metainforeques
 		entries:   make(map[protocol.ID]*inboundEntry),
 		late:      make(map[protocol.ID]*inboundEntry),
 		lateOrder: list.New(),
+
+		unknownHashes: make(map[protocol.ID]struct{}),
 		mseIndex: lru.NewLRU[metainforequester.MSEKey, protocol.ID](
 			config.maxHashes+config.lateMax+config.dhtMax,
 			nil,
@@ -422,6 +438,9 @@ func (p *inboundPeers) handle(ctx context.Context, conn net.Conn, host netip.Add
 
 	defer conn.Close()
 
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+
 	result := p.receive(ctx, conn)
 
 	p.c.dialsTotal.With(prometheus.Labels{"source": sourceInboundPeer, "result": result}).Inc()
@@ -442,9 +461,9 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 
 	switch {
 	case errors.Is(err, metainforequester.ErrUnknownInfoHash):
-		c.countHash(sourceInboundPeer, stageInboundUnknownHash, 1)
+		c.countHash(sourceInboundPeer, stageInboundUnknownKey, 1)
 
-		return stageInboundUnknownHash
+		return stageInboundUnknownKey
 	case err != nil:
 		c.countHash(sourceInboundPeer, stageInboundHandshake, 1)
 
@@ -469,10 +488,26 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 				c.countHash(sourceInboundPeer, "unknown_closed", 1)
 			default:
 				c.countHash(sourceInboundPeer, "unknown_other", 1)
+
+				if p.config.unknown && !in.Encrypted {
+					entry = p.claimUnknown(in.InfoHash)
+				}
+
+				if entry != nil && c.torrentInDatabase(ctx, in.InfoHash) {
+					c.fetched.add(in.InfoHash)
+					c.countHash(sourceInboundPeer, stageInboundUnknownKnown, 1)
+					p.unclaim(entry)
+
+					entry = nil
+				}
 			}
 		}
 
-		return kind
+		if entry == nil {
+			return kind
+		}
+
+		c.countHash(sourceInboundPeer, stageInboundUnknownConn, 1)
 	}
 
 	defer p.unclaim(entry)
@@ -503,13 +538,17 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 			c.countHash(sourceInboundPeer, stageInboundNoMetaInfo+scraped, 1)
 		}
 
+		if entry.unknown {
+			c.countHash(sourceInboundPeer, stageInboundNoMetaInfo+suffixInboundUnknown, 1)
+		}
+
 		return "no_metadata_size"
 	case errors.Is(err, metainforequester.ErrIncomingBudget):
-		c.countHash(sourceInboundPeer, stageInboundFetchFailed, 1)
+		c.countFetchFailed(entry)
 
 		return "budget"
 	case err != nil:
-		c.countHash(sourceInboundPeer, stageInboundFetchFailed, 1)
+		c.countFetchFailed(entry)
 
 		return classifyDialError(err)
 	}
@@ -523,9 +562,10 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 		return stageBanned
 	}
 
-	c.fetched.add(in.InfoHash)
-
-	if !p.take(entry) {
+	switch taken := p.take(entry); {
+	case taken && !entry.unknown:
+		c.fetched.add(in.InfoHash)
+	case !taken && !entry.dht, c.fetched.testAndAdd(in.InfoHash):
 		c.countHash(sourceInboundPeer, stageAlreadyFetched, 1)
 
 		return stageAlreadyFetched
@@ -545,12 +585,18 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 		c.countHash(sourceInboundPeer, stageMetaInfoOK+scraped, 1)
 	}
 
-	if waited := int(p.now().Sub(entry.since).Seconds()); entry.dht {
+	if waited := int(p.now().Sub(entry.since).Seconds()); entry.unknown {
+		c.countHash(sourceInboundPeer, stageMetaInfoOK+suffixInboundUnknown, 1)
+	} else if entry.dht {
 		c.countHash(sourceInboundPeer, stageMetaInfoOK+"_dht", 1)
 		c.countHash(sourceInboundPeer, stageMetaInfoOK+"_dht_wait_seconds", waited)
 	} else {
 		c.countHash(sourceInboundPeer, stageMetaInfoOK+trackerSource(entry.seeders), 1)
 		c.countHash(sourceInboundPeer, stageMetaInfoOK+"_wait_seconds", waited)
+
+		if p.hadDHTAnnounce(entry) {
+			c.countHash(sourceInboundPeer, stageMetaInfoOK+"_dht_announced", 1)
+		}
 	}
 
 	if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok && dht.IsIPv6(tcpAddr.AddrPort().Addr()) {
@@ -611,7 +657,7 @@ func (p *inboundPeers) join(s *trackerScraper, index int, hash protocol.ID, seed
 		}
 
 		if late, ok := p.late[hash]; ok {
-			p.removeLate(late)
+			p.dropLate(late)
 		}
 
 		p.seq++
@@ -651,6 +697,8 @@ func (p *inboundPeers) retire(entry *inboundEntry) {
 	p.leave(entry)
 
 	if p.config.lateMax <= 0 {
+		p.unindexMSE(entry.hash)
+
 		return
 	}
 
@@ -670,31 +718,40 @@ func (p *inboundPeers) retire(entry *inboundEntry) {
 	p.late[entry.hash] = entry
 }
 
-func (p *inboundPeers) removeLate(entry *inboundEntry) {
+func (p *inboundPeers) dropLate(entry *inboundEntry) {
 	delete(p.late, entry.hash)
 	p.lateOrder.Remove(entry.elem)
 }
 
+func (p *inboundPeers) removeLate(entry *inboundEntry) {
+	p.dropLate(entry)
+	p.unindexMSE(entry.hash)
+}
+
 func (p *inboundPeers) forget(hash protocol.ID) string {
+	kind := ""
+
 	if entry, ok := p.entries[hash]; ok {
 		entry.done = true
 		p.leave(entry)
 
-		return "active"
+		kind = "active"
 	}
 
 	if entry, ok := p.late[hash]; ok {
 		entry.done = true
 		p.removeLate(entry)
 
-		return "late"
+		kind = cmp.Or(kind, "late")
 	}
 
 	if p.dhtSet.remove(hash) {
-		return "dht"
+		kind = cmp.Or(kind, "dht")
 	}
 
-	return ""
+	p.unindexMSE(hash)
+
+	return kind
 }
 
 // leaveAll queues the stops of every membership, largest swarms first, and waits for the announce loops
@@ -878,6 +935,13 @@ func (p *inboundPeers) extraJoined(hash protocol.ID) {
 	}
 }
 
+func (p *inboundPeers) hadDHTAnnounce(entry *inboundEntry) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return entry.dhtAnnounced
+}
+
 func (p *inboundPeers) hadExtras(entry *inboundEntry) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -898,6 +962,23 @@ func (p *inboundPeers) origin(entry *inboundEntry) nodeHasPeersForHash {
 
 func (p *inboundPeers) indexMSE(hash protocol.ID) {
 	p.mseIndex.Add(metainforequester.MSEKeyOf(hash), hash)
+}
+
+// unindexMSE drops the key of a hash that no set holds any more; it needs mu
+func (p *inboundPeers) unindexMSE(hash protocol.ID) {
+	if _, ok := p.entries[hash]; ok {
+		return
+	}
+
+	if _, ok := p.late[hash]; ok {
+		return
+	}
+
+	if p.dhtSet.get(hash) != nil {
+		return
+	}
+
+	p.mseIndex.Remove(metainforequester.MSEKeyOf(hash))
 }
 
 func (p *inboundPeers) lookupMSE(key metainforequester.MSEKey) (protocol.ID, bool) {
@@ -924,7 +1005,7 @@ func (p *inboundPeers) claim(hash protocol.ID, encrypted bool) (*inboundEntry, s
 
 	if held := p.dhtSet.get(hash); !ok && held != nil {
 		switch {
-		case p.c.fetched.test(hash):
+		case p.c.fetched.test(hash), p.c.closedSwarms.test(hash):
 			p.dhtSet.remove(hash)
 		case held.active >= inboundConnsPerHash:
 			return nil, stageInboundBusy
@@ -953,9 +1034,61 @@ func (p *inboundPeers) claim(hash protocol.ID, encrypted bool) (*inboundEntry, s
 	return entry, kind
 }
 
+// claimUnknown serves a plaintext hash that no set holds: one fetch per hash, a quarter of the connections at most
+func (p *inboundPeers) claimUnknown(hash protocol.ID) *inboundEntry {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if _, ok := p.unknownHashes[hash]; ok {
+		p.c.countHash(sourceInboundPeer, stageInboundUnknownDup, 1)
+
+		return nil
+	}
+
+	if p.unknownActive >= p.config.maxConns/4 {
+		p.c.countHash(sourceInboundPeer, stageInboundUnknownBusy, 1)
+
+		return nil
+	}
+
+	p.unknownActive++
+	p.unknownHashes[hash] = struct{}{}
+
+	return &inboundEntry{hash: hash, req: nodeHasPeersForHash{infoHash: hash}, since: p.now(), unknown: true}
+}
+
+func (c *crawler) torrentInDatabase(ctx context.Context, hash protocol.ID) bool {
+	if c.inDatabase != nil {
+		return c.inDatabase(ctx, hash)
+	}
+
+	if c.dao == nil {
+		return false
+	}
+
+	count, err := c.dao.Torrent.WithContext(ctx).Where(c.dao.Torrent.InfoHash.Eq(hash)).Count()
+
+	return err == nil && count > 0
+}
+
+func (c *crawler) countFetchFailed(entry *inboundEntry) {
+	c.countHash(sourceInboundPeer, stageInboundFetchFailed, 1)
+
+	if entry.unknown {
+		c.countHash(sourceInboundPeer, stageInboundFetchFailed+suffixInboundUnknown, 1)
+	}
+}
+
 func (p *inboundPeers) unclaim(entry *inboundEntry) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	if entry.unknown {
+		p.unknownActive--
+		delete(p.unknownHashes, entry.hash)
+
+		return
+	}
 
 	if !entry.dht {
 		entry.active--
@@ -968,14 +1101,15 @@ func (p *inboundPeers) take(entry *inboundEntry) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if entry.done || (entry.dht && p.dhtSet.get(entry.hash) == nil) {
+	if entry.done {
 		return false
 	}
 
+	held := !entry.dht || p.dhtSet.get(entry.hash) != nil
 	entry.done = true
 	p.forget(entry.hash)
 
-	return true
+	return held
 }
 
 func (p *inboundPeers) size() int {

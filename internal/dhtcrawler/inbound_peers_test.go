@@ -592,8 +592,13 @@ func TestInboundFetchReachesPersistence(t *testing.T) {
 			t.Fatalf("%s: a hash that is no longer wanted was answered", name)
 		}
 
+		unknown := stageInboundUnknownHash
+		if encrypted {
+			unknown = stageInboundUnknownKey
+		}
+
 		eventually(t, name+" unknown hash", func() bool {
-			return hashCount(t, i.crawler, sourceInboundPeer, stageInboundUnknownHash) == 1
+			return hashCount(t, i.crawler, sourceInboundPeer, unknown) == 1
 		})
 		i.nothingPersisted(t)
 	}
@@ -1067,8 +1072,10 @@ func (a *announcingClient) GetPeersScrape(
 	case "leechers":
 		peers.AddIP(net.IPv4(192, 0, 2, 51))
 	case "empty":
+	case "timeout":
+		return client.GetPeersScrapeResult{}, context.DeadlineExceeded
 	default:
-		return client.GetPeersScrapeResult{}, errors.New("missing bloom filter in scrape response")
+		return client.GetPeersScrapeResult{}, client.ErrScrapeNoFilter
 	}
 
 	return client.GetPeersScrapeResult{BfSeeders: *seeds.ToBloomFilter(), BfPeers: *peers.ToBloomFilter()}, nil
@@ -2050,7 +2057,8 @@ func TestDHTJoinBySwarmSeeds(t *testing.T) {
 	scrapes := append([]dhtAnnounce(nil), cl.scrapes...)
 	cl.mu.Unlock()
 
-	if len(scrapes) != 8 || count("dht_scrape_failed") != 2 {
+	if len(scrapes) != 8 || count("dht_scrape_no_filter") != 2 || count("dht_scrape_timeout") != 0 ||
+		count("dht_scrape_failed") != 0 {
 		t.Fatalf("want two scrape queries per hash and two unanswered ones, got %d", len(scrapes))
 	}
 
@@ -2131,4 +2139,717 @@ func dhtClassOf(i inboundTest, hash protocol.ID) (uint8, bool) {
 	}
 
 	return held.class, true
+}
+
+type checkFunc func(metainfo.Info) error
+
+func (f checkFunc) Check(info metainfo.Info) error { return f(info) }
+
+func closedSwarmMemory(t *testing.T) *failedHashes {
+	t.Helper()
+
+	memory, err := newFailedHashes(t.TempDir(), time.Hour, time.Hour, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return memory
+}
+
+func dhtInboundConfig() inboundConfig {
+	return inboundConfig{
+		maxHashes: 2, hold: time.Minute, maxConns: 4, lateMax: 1, lateTTL: 10 * time.Minute,
+		dht: true, dhtPPS: 100, dhtMax: 2, dhtTTL: 5 * time.Minute,
+	}
+}
+
+func startDHTInboundTest(t *testing.T, config inboundConfig) (inboundTest, *announcingClient) {
+	t.Helper()
+
+	cl := &announcingClient{nodes: make(map[netip.AddrPort]protocol.ID)}
+	c := newFamilyTestCrawler(false, cl)
+	c.closedSwarms = closedSwarmMemory(t)
+
+	return startInboundTest(t, c, config, offlineScraper(1)), cl
+}
+
+func (i inboundTest) holdDHT(hash protocol.ID) bool {
+	i.inbound.mu.Lock()
+	defer i.inbound.mu.Unlock()
+
+	added, _ := i.inbound.dhtSet.add(newDHTHeld(sampleRequest(hash), uint32(i.inbound.now().Unix())))
+
+	return added
+}
+
+func (i inboundTest) indexed(hash protocol.ID) bool {
+	_, ok := i.inbound.lookupMSE(metainforequester.MSEKeyOf(hash))
+
+	return ok
+}
+
+func TestMSEKeyLeavesWithTheLastSet(t *testing.T) {
+	t.Parallel()
+
+	t.Run("release and take", func(t *testing.T) {
+		t.Parallel()
+
+		i, _ := startDHTInboundTest(t, dhtInboundConfig())
+		released, taken := protocol.ID{1}, protocol.ID{2}
+
+		i.join(released, 5)
+		i.join(taken, 5)
+
+		entry, _ := i.inbound.claim(taken, false)
+
+		if !i.indexed(released) || !i.indexed(taken) {
+			t.Fatal("a held hash must be indexed")
+		}
+
+		i.inbound.release(released, stageInboundFetchedOut)
+
+		if !i.inbound.take(entry) || i.indexed(released) || i.indexed(taken) {
+			t.Fatal("a released or taken hash must leave the key index")
+		}
+	})
+
+	t.Run("late expiry and eviction", func(t *testing.T) {
+		t.Parallel()
+
+		i, _ := startDHTInboundTest(t, dhtInboundConfig())
+		first, second := protocol.ID{1}, protocol.ID{2}
+
+		i.join(first, 5)
+		i.join(second, 5)
+		i.clock.Add(int64(time.Minute))
+		i.inbound.expire()
+
+		if i.inbound.lateSize() != 1 || i.indexed(first) == i.indexed(second) {
+			t.Fatalf("the evicted late hash must leave the key index, %d late", i.inbound.lateSize())
+		}
+
+		i.clock.Add(int64(10 * time.Minute))
+		i.inbound.expire()
+
+		if i.indexed(first) || i.indexed(second) {
+			t.Fatal("an expired late hash must leave the key index")
+		}
+	})
+
+	t.Run("no late set", func(t *testing.T) {
+		t.Parallel()
+
+		config := dhtInboundConfig()
+		config.lateMax = 0
+
+		i, _ := startDHTInboundTest(t, config)
+
+		i.join(protocol.ID{1}, 5)
+		i.clock.Add(int64(time.Minute))
+		i.inbound.expire()
+
+		if i.indexed(protocol.ID{1}) {
+			t.Fatal("a hash that expires without a late set must leave the key index")
+		}
+	})
+
+	t.Run("dht expiry, eviction and removal", func(t *testing.T) {
+		t.Parallel()
+
+		i, _ := startDHTInboundTest(t, dhtInboundConfig())
+		oldest, middle, newest := protocol.ID{1}, protocol.ID{2}, protocol.ID{3}
+
+		i.holdDHT(oldest)
+		i.holdDHT(middle)
+
+		if !i.indexed(oldest) || !i.indexed(middle) {
+			t.Fatal("a DHT-held hash must be indexed")
+		}
+
+		i.holdDHT(newest)
+
+		if i.indexed(oldest) || !i.indexed(middle) || !i.indexed(newest) {
+			t.Fatal("an evicted DHT-held hash must leave the key index")
+		}
+
+		i.inbound.release(middle, stageInboundFetchedOut)
+
+		if i.indexed(middle) || !i.indexed(newest) {
+			t.Fatal("a removed DHT-held hash must leave the key index")
+		}
+
+		i.clock.Add(int64(6 * time.Minute))
+		i.inbound.expire()
+
+		if i.indexed(newest) {
+			t.Fatal("an expired DHT-held hash must leave the key index")
+		}
+	})
+
+	t.Run("held by two sets", func(t *testing.T) {
+		t.Parallel()
+
+		i, _ := startDHTInboundTest(t, dhtInboundConfig())
+		both, shared := protocol.ID{1}, protocol.ID{2}
+
+		i.join(both, 5)
+		i.holdDHT(both)
+		i.join(shared, 5)
+		i.holdDHT(shared)
+		i.inbound.release(both, stageInboundFetchedOut)
+
+		if i.indexed(both) || i.inbound.dhtSize() != 1 || len(i.registered()) != 1 {
+			t.Fatalf("a release must clear every set, %d held by the DHT", i.inbound.dhtSize())
+		}
+
+		i.clock.Add(int64(time.Minute))
+		i.inbound.expire()
+
+		if !i.indexed(shared) {
+			t.Fatal("a hash that is still held by the DHT set keeps its key")
+		}
+
+		i.clock.Add(int64(5 * time.Minute))
+		i.inbound.expire()
+
+		if !i.indexed(shared) {
+			t.Fatal("a hash that is still late keeps its key")
+		}
+
+		i.clock.Add(int64(10 * time.Minute))
+		i.inbound.expire()
+
+		if i.indexed(shared) {
+			t.Fatal("a hash that left the last set must leave the key index")
+		}
+	})
+}
+
+func TestUnknownHashSplitAddsUp(t *testing.T) {
+	t.Parallel()
+
+	i, _ := startDHTInboundTest(t, dhtInboundConfig())
+	count := func(stage string) float64 { return hashCount(t, i.crawler, sourceInboundPeer, stage) }
+	stranger, fetched, closed := protocol.ID{1}, protocol.ID{2}, protocol.ID{3}
+
+	i.fetched.add(fetched)
+	i.closedSwarms.add(closed)
+
+	for _, hash := range []protocol.ID{stranger, fetched, closed} {
+		_, _ = peertest.Peer{InfoHash: hash}.Dial(i.address())
+	}
+
+	eventually(t, "the claim rejects", func() bool { return count(stageInboundUnknownHash) == 3 })
+
+	_, _ = peertest.Peer{InfoHash: stranger, Encrypted: true}.Dial(i.address())
+
+	eventually(t, "the key reject", func() bool { return count(stageInboundUnknownKey) == 1 })
+
+	split := count("unknown_fetched") + count("unknown_closed") + count("unknown_other")
+
+	if count(stageInboundUnknownHash) != split || count("unknown_fetched") != 1 || count("unknown_closed") != 1 ||
+		count("unknown_other") != 1 {
+		t.Fatalf("unknown_hash %v, split %v", count(stageInboundUnknownHash), split)
+	}
+}
+
+func TestInboundHandleEndsWithTheContext(t *testing.T) {
+	t.Parallel()
+
+	i := newInboundTest(t, inboundConfig{maxHashes: 10, hold: time.Minute, maxConns: 4}, offlineScraper(1))
+	peer, conn := net.Pipe()
+
+	t.Cleanup(func() { _ = peer.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	i.inbound.slots <- struct{}{}
+
+	go func() {
+		i.inbound.handle(ctx, conn, netip.Addr{})
+		close(done)
+	}()
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("a cancelled context must end an in-flight handshake at once")
+	}
+
+	if len(i.inbound.slots) != 0 {
+		t.Fatal("the slot must be given back")
+	}
+}
+
+func TestFetchSurvivesTheLossOfTheHeldRecord(t *testing.T) {
+	t.Parallel()
+
+	i, _ := startDHTInboundTest(t, dhtInboundConfig())
+	count := func(stage string) float64 { return hashCount(t, i.crawler, sourceInboundPeer, stage) }
+	vanishing, vanishingHash := inboundMetadata(t, "vanishing")
+	raced, racedHash := inboundMetadata(t, "raced")
+
+	i.banningChecker = checkFunc(func(info metainfo.Info) error {
+		switch info.Name {
+		case "vanishing":
+			i.inbound.release(vanishingHash, "released_closed_swarm")
+		case "raced":
+			i.fetched.add(racedHash)
+			i.inbound.fetchedOutgoing(racedHash)
+		}
+
+		return nil
+	})
+
+	i.holdDHT(vanishingHash)
+	i.holdDHT(racedHash)
+
+	if _, err := (peertest.Peer{InfoHash: vanishingHash, Metadata: vanishing}).Dial(i.address()); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := i.persisted(t); got.infoHash != vanishingHash || !i.fetched.test(vanishingHash) {
+		t.Fatalf("a fetch whose held record vanished must still be persisted, got %+v", got.nodeHasPeersForHash)
+	}
+
+	if _, err := (peertest.Peer{InfoHash: racedHash, Metadata: raced}).Dial(i.address()); err != nil {
+		t.Fatal(err)
+	}
+
+	eventually(t, "the lost race", func() bool { return count(stageAlreadyFetched) == 1 })
+	i.nothingPersisted(t)
+
+	if count(stageMetaInfoOK) != 1 || i.indexed(vanishingHash) {
+		t.Fatal("the loser of the fetched race must not count as a success")
+	}
+}
+
+func TestForgetClearsEverySetAndTheDHTJoinChecksThem(t *testing.T) {
+	t.Parallel()
+
+	i, _ := startDHTInboundTest(t, dhtInboundConfig())
+	count := func(stage string) float64 { return hashCount(t, i.crawler, sourceInboundPeer, stage) }
+	stale := map[string]protocol.ID{"registered": {1}, "late": {2}, "fetched": {3}, "closed": {4}}
+	fresh := protocol.ID{5}
+
+	request := func(hash protocol.ID) nodeHasPeersForHash {
+		req := sampleRequest(hash)
+
+		for n := byte(1); n <= 3; n++ {
+			req.tokens = append(req.tokens, lookupToken{
+				addr:     netip.AddrPortFrom(netip.AddrFrom4([4]byte{192, 0, 2, n}), 6881),
+				distance: protocol.ID{n},
+				token:    "t",
+			})
+		}
+
+		return req
+	}
+
+	i.join(stale["registered"], 5)
+	i.join(stale["late"], 5)
+	i.inbound.mu.Lock()
+	i.inbound.retire(i.inbound.entries[stale["late"]])
+	i.inbound.mu.Unlock()
+	i.fetched.add(stale["fetched"])
+	i.closedSwarms.add(stale["closed"])
+
+	for name, hash := range stale {
+		i.inbound.joinDHT(context.Background(), request(hash))
+
+		if i.inbound.dhtSize() != 0 {
+			t.Fatalf("a %s hash must not enter the DHT-held set", name)
+		}
+	}
+
+	i.inbound.joinDHT(context.Background(), request(fresh))
+
+	if count("dht_join_stale") != 4 || i.inbound.dhtSize() != 1 || !i.indexed(fresh) {
+		t.Fatalf("want 4 stale joins and the fresh hash held, got %v and %d", count("dht_join_stale"), i.inbound.dhtSize())
+	}
+
+	i.closedSwarms.add(fresh)
+
+	if entry, kind := i.inbound.claim(fresh, false); entry != nil || kind != stageInboundUnknownHash ||
+		i.inbound.dhtSize() != 0 || i.indexed(fresh) {
+		t.Fatalf("a closed swarm must not be served from the DHT-held set, got %s", kind)
+	}
+}
+
+func TestDHTScrapeFailuresAreTold(t *testing.T) {
+	t.Parallel()
+
+	i, cl := startDHTInboundTest(t, dhtInboundConfig())
+	count := func(stage string) float64 { return hashCount(t, i.crawler, sourceInboundPeer, stage) }
+	noFilter, timeout := protocol.ID{1}, protocol.ID{2}
+	cl.swarms = map[protocol.ID]string{timeout: "timeout"}
+
+	tokens := []lookupToken{
+		{addr: netip.MustParseAddrPort("192.0.2.1:6881"), distance: protocol.ID{1}, token: "t"},
+		{addr: netip.MustParseAddrPort("192.0.2.2:6881"), distance: protocol.ID{2}, token: "t"},
+	}
+
+	for _, hash := range []protocol.ID{noFilter, timeout} {
+		if class := i.inbound.scrapeClass(context.Background(), hash, tokens); class != dhtClassUnknown {
+			t.Fatalf("an unanswered scrape is class unknown, got %d", class)
+		}
+	}
+
+	if count("dht_scrape_no_filter") != 2 || count("dht_scrape_timeout") != 2 || count("dht_scrape_failed") != 0 {
+		t.Fatalf("no filter %v, timeout %v", count("dht_scrape_no_filter"), count("dht_scrape_timeout"))
+	}
+}
+
+func TestMetaInfoOKCountsTheDHTAnnouncedEntries(t *testing.T) {
+	t.Parallel()
+
+	start := func(announces bool) (inboundTest, *announcingClient) {
+		config := dhtInboundConfig()
+		config.maxHashes = 10
+		i, cl := startDHTInboundTest(t, config)
+
+		if announces {
+			for n := 1; n <= 10; n++ {
+				addr := netip.AddrPortFrom(netip.AddrFrom4([4]byte{192, 0, 2, byte(n)}), 6881)
+				cl.nodes[addr] = protocol.ID{0x80 + byte(n)}
+				i.v4.nodePool.add(cl.nodes[addr], addr)
+			}
+
+			i.v4.nodePool.rebuild()
+		}
+
+		return i, cl
+	}
+
+	for name, announces := range map[string]bool{"announced": true, "not announced": false} {
+		i, _ := start(announces)
+		metadata, hash := inboundMetadata(t, name)
+
+		i.join(hash, 7)
+
+		stage := "dht_announce_failed"
+		want := 0.0
+
+		if announces {
+			stage = "dht_announced"
+			want = 1
+		}
+
+		eventually(t, name, func() bool { return hashCount(t, i.crawler, sourceInboundPeer, stage) == 1 })
+
+		if _, err := (peertest.Peer{InfoHash: hash, Metadata: metadata}).Dial(i.address()); err != nil {
+			t.Fatal(err)
+		}
+
+		i.persisted(t)
+
+		for stage, count := range map[string]float64{
+			stageMetaInfoOK:                    1,
+			stageMetaInfoOK + "_dht_announced": want,
+			stageMetaInfoOK + "_dht":           0,
+		} {
+			if got := hashCount(t, i.crawler, sourceInboundPeer, stage); got != count {
+				t.Errorf("%s: stage %s: want %v, got %v", name, stage, count, got)
+			}
+		}
+	}
+}
+
+func unknownInboundTest(t *testing.T, maxConns int, on bool) inboundTest {
+	t.Helper()
+
+	c := newTestCrawler(nil, nil)
+	c.closedSwarms = closedSwarmMemory(t)
+
+	config := inboundConfig{maxHashes: 10, hold: time.Minute, maxConns: maxConns, unknown: on}
+
+	return startInboundTest(t, c, config, offlineScraper(1))
+}
+
+func (i inboundTest) unknownIdle() bool {
+	i.inbound.mu.Lock()
+	defer i.inbound.mu.Unlock()
+
+	return i.inbound.unknownActive == 0 && len(i.inbound.unknownHashes) == 0
+}
+
+func (i inboundTest) holdUnknown(t *testing.T, hash protocol.ID) {
+	t.Helper()
+
+	before := hashCount(t, i.crawler, sourceInboundPeer, stageInboundUnknownConn)
+
+	go func() { _, _ = peertest.Peer{InfoHash: hash, Silent: true}.Dial(i.address()) }()
+
+	eventually(t, "a held unknown connection", func() bool {
+		return hashCount(t, i.crawler, sourceInboundPeer, stageInboundUnknownConn) == before+1
+	})
+}
+
+func TestInboundUnknownSkipsATorrentTheDatabaseHas(t *testing.T) {
+	t.Parallel()
+
+	c := newTestCrawler(nil, nil)
+	c.closedSwarms = closedSwarmMemory(t)
+	c.inDatabase = func(context.Context, protocol.ID) bool { return true }
+
+	i := startInboundTest(t, c, inboundConfig{maxHashes: 10, hold: time.Minute, maxConns: 8, unknown: true}, offlineScraper(1))
+	metadata, hash := inboundMetadata(t, "unknown known")
+
+	if _, err := (peertest.Peer{InfoHash: hash, Metadata: metadata}).Dial(i.address()); err == nil {
+		t.Fatal("a torrent the database has was asked for again")
+	}
+
+	eventually(t, "the torrent the database has", func() bool {
+		return hashCount(t, i.crawler, sourceInboundPeer, stageInboundUnknownKnown) == 1 && i.unknownIdle()
+	})
+
+	i.nothingPersisted(t)
+
+	if !i.fetched.test(hash) {
+		t.Fatal("a torrent the database has must enter the fetched memory")
+	}
+
+	for _, stage := range []string{stageInboundUnknownConn, stageMetaInfoOK} {
+		if got := hashCount(t, i.crawler, sourceInboundPeer, stage); got != 0 {
+			t.Fatalf("a torrent the database has is not served, %s %v", stage, got)
+		}
+	}
+}
+
+func TestInboundUnknownOffDropsTheConnection(t *testing.T) {
+	t.Parallel()
+
+	i := unknownInboundTest(t, 8, false)
+	metadata, hash := inboundMetadata(t, "unknown off")
+
+	if _, err := (peertest.Peer{InfoHash: hash, Metadata: metadata}).Dial(i.address()); err == nil {
+		t.Fatal("an unknown hash was answered with the knob off")
+	}
+
+	eventually(t, "the drop", func() bool { return hashCount(t, i.crawler, sourceInboundPeer, "unknown_other") == 1 })
+	i.nothingPersisted(t)
+
+	for _, stage := range []string{
+		stageInboundUnknownConn, stageInboundUnknownBusy, stageInboundUnknownDup, stageMetaInfoOK + "_unknown",
+	} {
+		if got := hashCount(t, i.crawler, sourceInboundPeer, stage); got != 0 {
+			t.Errorf("stage %s: want 0, got %v", stage, got)
+		}
+	}
+
+	if i.fetched.test(hash) || dialCount(t, i.crawler, stageInboundUnknownHash) != 1 {
+		t.Fatal("the knob off must leave the hash alone and end at unknown_hash")
+	}
+}
+
+func TestInboundUnknownOnServesAnUnheldHash(t *testing.T) {
+	t.Parallel()
+
+	i := unknownInboundTest(t, 8, true)
+	metadata, hash := inboundMetadata(t, "unknown on")
+
+	if _, err := (peertest.Peer{InfoHash: hash, Metadata: metadata}).Dial(i.address()); err != nil {
+		t.Fatal(err)
+	}
+
+	got := i.persisted(t)
+	if got.infoHash != hash || got.metaInfo.Name != "unknown on" || got.source != sourceInboundPeer || got.origin != "" {
+		t.Fatalf("persisted %+v", got.nodeHasPeersForHash)
+	}
+
+	if !i.fetched.test(hash) {
+		t.Fatal("a fetched unknown hash must enter the fetched memory")
+	}
+
+	eventually(t, "the result and the free slot", func() bool {
+		return dialCount(t, i.crawler, "ok") == 1 && i.unknownIdle()
+	})
+
+	for stage, want := range map[string]float64{
+		stageInboundUnknownHash:              1,
+		"unknown_other":                      1,
+		stageInboundUnknownConn:              1,
+		stageMetaInfoOK:                      1,
+		stageMetaInfoOK + "_unknown":         1,
+		stageInboundNoMetaInfo + "_unknown":  0,
+		stageInboundFetchFailed + "_unknown": 0,
+		stageInboundUnknownBusy:              0,
+		stageInboundUnknownDup:               0,
+	} {
+		if got := hashCount(t, i.crawler, sourceInboundPeer, stage); got != want {
+			t.Errorf("stage %s: want %v, got %v", stage, want, got)
+		}
+	}
+
+	if _, err := (peertest.Peer{InfoHash: hash, Metadata: metadata}).Dial(i.address()); err == nil {
+		t.Fatal("a hash fetched already was answered")
+	}
+
+	eventually(t, "the fetched hash", func() bool { return hashCount(t, i.crawler, sourceInboundPeer, "unknown_fetched") == 1 })
+
+	i.nothingPersisted(t)
+
+	if got := hashCount(t, i.crawler, sourceInboundPeer, stageInboundUnknownConn); got != 1 {
+		t.Fatalf("a fetched hash must not be served, unknown_conn %v", got)
+	}
+}
+
+func TestInboundUnknownSkipsEncryptedAndFailsLikeOthers(t *testing.T) {
+	t.Parallel()
+
+	i := unknownInboundTest(t, 8, true)
+	metadata, hash := inboundMetadata(t, "unknown failures")
+	forged, _ := inboundMetadata(t, "forged")
+
+	if _, err := (peertest.Peer{InfoHash: hash, Metadata: metadata, Encrypted: true}).Dial(i.address()); err == nil {
+		t.Fatal("an encrypted unknown hash was answered")
+	}
+
+	eventually(t, "the key reject", func() bool { return hashCount(t, i.crawler, sourceInboundPeer, stageInboundUnknownKey) == 1 })
+
+	_, _ = peertest.Peer{InfoHash: hash}.Dial(i.address())
+
+	eventually(t, "no meta info", func() bool {
+		return hashCount(t, i.crawler, sourceInboundPeer, stageInboundNoMetaInfo+"_unknown") == 1
+	})
+
+	_, _ = peertest.Peer{InfoHash: hash, Metadata: forged}.Dial(i.address())
+
+	eventually(t, "fetch failed", func() bool {
+		return hashCount(t, i.crawler, sourceInboundPeer, stageInboundFetchFailed+"_unknown") == 1 &&
+			hashCount(t, i.crawler, sourceInboundPeer, stageInboundFetchFailed) == 1
+	})
+
+	eventually(t, "free slots", i.unknownIdle)
+	i.nothingPersisted(t)
+
+	if i.fetched.test(hash) || hashCount(t, i.crawler, sourceInboundPeer, stageInboundUnknownConn) != 2 {
+		t.Fatal("a failed fetch must leave the hash unfetched")
+	}
+
+	for _, stage := range []string{stageMetaInfoOK, stageMetaInfoOK + "_unknown"} {
+		if got := hashCount(t, i.crawler, sourceInboundPeer, stage); got != 0 {
+			t.Errorf("stage %s: want 0, got %v", stage, got)
+		}
+	}
+}
+
+func TestInboundUnknownClosedSwarmHashIsNotServed(t *testing.T) {
+	t.Parallel()
+
+	i := unknownInboundTest(t, 8, true)
+	metadata, hash := inboundMetadata(t, "closed swarm")
+
+	i.closedSwarms.add(hash)
+
+	if _, err := (peertest.Peer{InfoHash: hash, Metadata: metadata}).Dial(i.address()); err == nil {
+		t.Fatal("a hash of a closed swarm was answered")
+	}
+
+	eventually(t, "the closed hash", func() bool { return hashCount(t, i.crawler, sourceInboundPeer, "unknown_closed") == 1 })
+
+	i.nothingPersisted(t)
+
+	for _, stage := range []string{"unknown_other", stageInboundUnknownConn} {
+		if got := hashCount(t, i.crawler, sourceInboundPeer, stage); got != 0 {
+			t.Errorf("stage %s: want 0, got %v", stage, got)
+		}
+	}
+}
+
+func TestInboundUnknownClosedNetworkPeerClosesTheSwarm(t *testing.T) {
+	t.Parallel()
+
+	i := unknownInboundTest(t, 8, true)
+	metadata, hash := inboundMetadata(t, "closed network")
+
+	_, _ = peertest.Peer{InfoHash: hash, ID: [20]byte([]byte("-XT1000-04d9f58343e2")), Silent: true}.Dial(i.address())
+
+	eventually(t, "closed network peer", func() bool {
+		return hashCount(t, i.crawler, sourceInboundPeer, stageInboundClosedNetwork) == 1 &&
+			dialCount(t, i.crawler, "closed_network_peer") == 1 && i.closedSwarms.test(hash) && i.unknownIdle()
+	})
+
+	i.nothingPersisted(t)
+
+	if _, err := (peertest.Peer{InfoHash: hash, Metadata: metadata}).Dial(i.address()); err == nil {
+		t.Fatal("a swarm that was closed meanwhile was answered")
+	}
+
+	eventually(t, "the closed hash", func() bool { return hashCount(t, i.crawler, sourceInboundPeer, "unknown_closed") == 1 })
+
+	if got := hashCount(t, i.crawler, sourceInboundPeer, stageInboundUnknownConn); got != 1 || i.fetched.test(hash) {
+		t.Fatalf("unknown_conn %v, fetched %v", got, i.fetched.test(hash))
+	}
+}
+
+func TestInboundUnknownIsBoundedAndOnePerHash(t *testing.T) {
+	t.Parallel()
+
+	i := unknownInboundTest(t, 8, true)
+	first, second, third := protocol.ID{1}, protocol.ID{2}, protocol.ID{3}
+	count := func(stage string) float64 { return hashCount(t, i.crawler, sourceInboundPeer, stage) }
+
+	i.holdUnknown(t, first)
+
+	_, _ = peertest.Peer{InfoHash: first}.Dial(i.address())
+
+	eventually(t, "the duplicate", func() bool { return count(stageInboundUnknownDup) == 1 })
+
+	i.holdUnknown(t, second)
+
+	_, _ = peertest.Peer{InfoHash: third}.Dial(i.address())
+
+	eventually(t, "the cap", func() bool { return count(stageInboundUnknownBusy) == 1 })
+
+	if count(stageInboundUnknownConn) != 2 || count(stageInboundUnknownDup) != 1 || count("unknown_other") != 4 ||
+		count(stageInboundUnknownHash) != 4 {
+		t.Fatalf("conn %v dup %v busy %v other %v hash %v", count(stageInboundUnknownConn), count(stageInboundUnknownDup),
+			count(stageInboundUnknownBusy), count("unknown_other"), count(stageInboundUnknownHash))
+	}
+
+	eventually(t, "the held connections to end", i.unknownIdle)
+
+	i.holdUnknown(t, third)
+}
+
+func TestInboundUnknownCapIsAQuarterOfTheConnections(t *testing.T) {
+	t.Parallel()
+
+	i := unknownInboundTest(t, 4, true)
+
+	i.holdUnknown(t, protocol.ID{1})
+
+	_, _ = peertest.Peer{InfoHash: protocol.ID{2}}.Dial(i.address())
+
+	eventually(t, "the cap", func() bool { return hashCount(t, i.crawler, sourceInboundPeer, stageInboundUnknownBusy) == 1 })
+
+	if got := hashCount(t, i.crawler, sourceInboundPeer, stageInboundUnknownConn); got != 1 {
+		t.Fatalf("want one served connection, got %v", got)
+	}
+}
+
+func TestInboundUnknownSplitAddsUp(t *testing.T) {
+	t.Parallel()
+
+	i := unknownInboundTest(t, 8, true)
+	count := func(stage string) float64 { return hashCount(t, i.crawler, sourceInboundPeer, stage) }
+	stranger, fetched, closed := protocol.ID{1}, protocol.ID{2}, protocol.ID{3}
+
+	i.fetched.add(fetched)
+	i.closedSwarms.add(closed)
+
+	for _, hash := range []protocol.ID{stranger, fetched, closed} {
+		_, _ = peertest.Peer{InfoHash: hash}.Dial(i.address())
+	}
+
+	eventually(t, "the claim rejects", func() bool { return count(stageInboundUnknownHash) == 3 })
+
+	if split := count("unknown_fetched") + count("unknown_closed") + count("unknown_other"); split != 3 ||
+		count("unknown_other") != 1 || count(stageInboundUnknownConn) != 1 {
+		t.Fatalf("unknown_hash %v, split %v", count(stageInboundUnknownHash), split)
+	}
 }

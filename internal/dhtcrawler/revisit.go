@@ -2,6 +2,7 @@ package dhtcrawler
 
 import (
 	"context"
+	"os"
 	"sync"
 	"time"
 
@@ -19,7 +20,7 @@ const (
 var (
 	revisitConcurrency = envInt("BITMAGNET_REVISIT_CONCURRENCY", 1000)
 	revisitMaxVisits   = envInt("BITMAGNET_REVISIT_MAX_VISITS", 10)
-	revisitEnabled     = envIsOn("BITMAGNET_REVISIT")
+	revisitEnabled     = os.Getenv("BITMAGNET_REVISIT") == "on"
 )
 
 type revisit struct {
@@ -42,6 +43,10 @@ func newRevisits() *revisits {
 		return nil
 	}
 
+	return newRevisitQueue()
+}
+
+func newRevisitQueue() *revisits {
 	return &revisits{
 		queue:  make(chan revisit, revisitQueue),
 		stage:  concurrency.NewBufferedConcurrentChannel[ktable.Node](revisitConcurrency, revisitConcurrency),

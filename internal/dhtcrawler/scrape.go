@@ -3,7 +3,6 @@ package dhtcrawler
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
 )
@@ -50,18 +49,12 @@ func (c *crawler) requestScrape(
 	})
 
 	if len(res.Nodes) > 0 {
-		cancelCtx, cancel := context.WithTimeout(ctx, time.Second)
-
 		for _, n := range res.Nodes {
 			select {
-			case <-cancelCtx.Done():
-				break
 			case c.discoveredNodes.In() <- ktable.NewNode(n.ID, n.Addr):
-				continue
+			default:
 			}
 		}
-
-		cancel()
 	}
 
 	return infoHashWithScrape{

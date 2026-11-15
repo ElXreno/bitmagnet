@@ -11,10 +11,7 @@ import (
 func TestRevisitPlan(t *testing.T) {
 	t.Parallel()
 
-	r := newRevisits()
-	if r == nil {
-		t.Skip("revisits are switched off in this environment")
-	}
+	r := newRevisitQueue()
 
 	node := ktable.NewNode(protocol.ID{1}, netip.MustParseAddrPort("192.0.2.1:6881"))
 

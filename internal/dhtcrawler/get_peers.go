@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
-	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/concurrency"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
@@ -18,8 +17,9 @@ func (c *crawler) runGetPeers(ctx context.Context) {
 	_ = c.getPeers.Run(ctx, func(req nodeHasPeersForHash) {
 		if !isSampleSource(req.source) {
 			select {
-			case <-ctx.Done():
 			case c.lookupsInbound.In() <- lookupRequest{nodeHasPeersForHash: req}:
+			default:
+				c.countHash(req.source, stageLookupDropped, 1)
 			}
 
 			return
@@ -141,18 +141,12 @@ func (c *crawler) requestPeersForHash(
 
 	if len(res.Nodes) > 0 {
 		// block the channel for up to a second in an attempt to add the nodes to the discoveredNodes channel
-		cancelCtx, cancel := context.WithTimeout(ctx, time.Second)
-
 		for _, n := range res.Nodes {
 			select {
-			case <-cancelCtx.Done():
-				break
 			case c.discoveredNodes.In() <- ktable.NewNode(n.ID, n.Addr):
-				continue
+			default:
 			}
 		}
-
-		cancel()
 	}
 
 	if len(res.Values) < 1 {

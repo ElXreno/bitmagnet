@@ -3,6 +3,7 @@ package responder
 import (
 	"context"
 	"net/netip"
+	"os"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht"
@@ -16,6 +17,9 @@ type InboundHash struct {
 	Query    string
 }
 
+// harvestGetPeers turns incoming get_peers queries into crawl candidates.
+var harvestGetPeers = os.Getenv("BITMAGNET_INBOUND_GET_PEERS") == "on"
+
 type responderHashDiscovery struct {
 	responder     Responder
 	inboundHashes chan<- InboundHash
@@ -27,7 +31,9 @@ func (r responderHashDiscovery) Respond(ctx context.Context, msg dht.RecvMsg) (d
 
 		switch msg.Msg.Q {
 		case dht.QGetPeers:
-			h.Peer = msg.From
+			if harvestGetPeers {
+				h.Peer = msg.From
+			}
 		case dht.QAnnouncePeer:
 			h.Peer = netip.AddrPortFrom(msg.From.Addr(), msg.AnnouncePort())
 		}

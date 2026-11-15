@@ -120,6 +120,16 @@ func (c *crawler) runInfoHashTriage(
 					c.trackers.submit(r.infoHash)
 					c.trackers6.submit(r.infoHash)
 
+					if !isSampleSource(r.source) {
+						select {
+						case c.lookupsInbound.In() <- lookupRequest{nodeHasPeersForHash: r}:
+						default:
+							c.countHash(r.source, stageLookupDropped, 1)
+						}
+
+						continue
+					}
+
 					sendOne := time.Now()
 
 					select {

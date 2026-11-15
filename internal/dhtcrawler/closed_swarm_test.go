@@ -2,6 +2,7 @@ package dhtcrawler
 
 import (
 	"context"
+	"crypto/sha1" //nolint:gosec
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -259,5 +260,28 @@ func TestCreateTorrentModelReadsTheV2FileTree(t *testing.T) {
 
 	if torrent.Size != 10 || torrent.FilesStatus != model.FilesStatusSingle || len(torrent.Files) != 0 {
 		t.Fatalf("single file v2 torrent: %+v", torrent)
+	}
+}
+
+func TestCreateTorrentModelLeavesPaddingFilesOut(t *testing.T) {
+	t.Parallel()
+
+	encoded := "d5:filesld6:lengthi10e4:pathl1:aeed4:attr1:p6:lengthi6e4:pathl4:.pad1:6eed6:lengthi20e4:pathl1:beee" +
+		"4:name4:test12:piece lengthi16e6:pieces20:aaaaaaaaaaaaaaaaaaaae"
+
+	info, _, err := metainfo.ParseMetaInfo(sha1.Sum([]byte(encoded)), []byte(encoded)) //nolint:gosec
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	torrent, err := createTorrentModel(protocol.ID{1}, info, false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if torrent.Size != 30 || torrent.FilesCount.Uint != 2 || len(torrent.Files) != 2 ||
+		torrent.Files[0].Path != "a" || torrent.Files[0].Index != 0 ||
+		torrent.Files[1].Path != "b" || torrent.Files[1].Index != 2 {
+		t.Fatalf("padding file kept: %+v", torrent)
 	}
 }

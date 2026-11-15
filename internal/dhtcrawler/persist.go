@@ -3,8 +3,10 @@ package dhtcrawler
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
+	mi "github.com/anacrolix/torrent/metainfo"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/processor"
@@ -161,6 +163,17 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 	}
 }
 
+// isPaddingFile reports a BEP 47 padding entry, which aligns the next file of a v1 file list to a piece.
+func isPaddingFile(file mi.FileInfo) bool {
+	if strings.Contains(file.Attr, "p") {
+		return true
+	}
+
+	path := file.BestPath()
+
+	return len(path) > 0 && strings.HasPrefix(path[len(path)-1], "_____padding_file_")
+}
+
 func createTorrentModel(
 	hash protocol.ID,
 	info metainfo.Info,
@@ -184,12 +197,25 @@ func createTorrentModel(
 		}
 	}
 
+	padding := 0
+	size := info.TotalLength()
+
+	for _, file := range infoFiles {
+		if isPaddingFile(file) {
+			padding++
+
+			if !info.HasV2() {
+				size -= file.Length
+			}
+		}
+	}
+
 	var filesCount model.NullUint
 
 	filesStatus := model.FilesStatusSingle
 	if len(infoFiles) > 0 {
 		filesStatus = model.FilesStatusMulti
-		filesCount = model.NewNullUint(uint(len(infoFiles)))
+		filesCount = model.NewNullUint(uint(len(infoFiles) - padding))
 	}
 
 	files := make([]model.TorrentFile, 0, min(int(saveFilesThreshold), len(infoFiles)))
@@ -197,7 +223,11 @@ func createTorrentModel(
 	seenPaths := make(map[string]struct{}, min(int(saveFilesThreshold), len(infoFiles)))
 
 	for i, file := range infoFiles {
-		if i >= int(saveFilesThreshold) {
+		if isPaddingFile(file) {
+			continue
+		}
+
+		if len(files) >= int(saveFilesThreshold) {
 			filesStatus = model.FilesStatusOverThreshold
 			break
 		}
@@ -229,7 +259,7 @@ func createTorrentModel(
 	return model.Torrent{
 		InfoHash:    hash,
 		Name:        name,
-		Size:        uint(info.TotalLength()),
+		Size:        uint(size),
 		Private:     private,
 		Pieces:      pieces,
 		Files:       files,

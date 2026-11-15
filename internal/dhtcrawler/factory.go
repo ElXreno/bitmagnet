@@ -311,6 +311,8 @@ func New(params Params) Result {
 
 					// todo: Fix!
 					//nolint:contextcheck
+					c.persisters.Add(2)
+
 					go c.start()
 					return nil
 				},
@@ -321,6 +323,8 @@ func New(params Params) Result {
 					if c.stopped != nil {
 						close(c.stopped)
 					}
+
+					defer c.persisters.Wait()
 
 					if err := c.failed.save(); err != nil {
 						return err

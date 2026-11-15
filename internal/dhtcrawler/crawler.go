@@ -78,6 +78,7 @@ type crawler struct {
 	// It is rotated every 10 seconds.
 	soughtNodeID   *concurrency.AtomicValue[protocol.ID]
 	stopped        chan struct{}
+	persisters     sync.WaitGroup
 	persistedTotal *prometheus.CounterVec
 	logger         *zap.SugaredLogger
 }
@@ -129,8 +130,18 @@ func (c *crawler) start() {
 	go c.runRequestMetaInfo(ctx)
 	go c.runScrape(ctx)
 	go c.reseedBootstrapNodes(ctx)
-	go c.runPersistTorrents(ctx)
-	go c.runPersistSources(ctx)
+	go func() {
+		defer c.persisters.Done()
+
+		c.runPersistTorrents(ctx)
+	}()
+
+	go func() {
+		defer c.persisters.Done()
+
+		c.runPersistSources(ctx)
+	}()
+
 	<-c.stopped
 }
 

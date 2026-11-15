@@ -24,140 +24,161 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			c.drainPersistTorrents(ctx)
+
 			return
 		case is := <-c.persistTorrents.Out():
-			torrentsToPersist := make([]*model.Torrent, 0, len(is))
+			dbCtx, cancel := graceContext(ctx, persistDrainTimeout)
+			c.persistTorrentBatch(ctx, dbCtx, is, true)
+			cancel()
+		}
+	}
+}
 
-			var torrentFilesToPersist []*model.TorrentFile
+func (c *crawler) drainPersistTorrents(ctx context.Context) {
+	drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistDrainTimeout)
+	defer cancel()
 
-			var torrentSourcesToPersist []*model.TorrentsTorrentSource
+	for _, batch := range c.persistTorrents.Drain(drainCtx) {
+		c.persistTorrentBatch(drainCtx, drainCtx, batch, false)
+	}
+}
 
-			var torrentPiecesToPersist []*model.TorrentPieces
+func (c *crawler) persistTorrentBatch(
+	ctx, dbCtx context.Context,
+	is []infoHashWithMetaInfo,
+	forwardToScrape bool,
+) {
+	torrentsToPersist := make([]*model.Torrent, 0, len(is))
 
-			var queueJobsToPersist []*model.QueueJob
+	var torrentFilesToPersist []*model.TorrentFile
 
-			hashMap := make(map[protocol.ID]infoHashWithMetaInfo, len(is))
+	var torrentSourcesToPersist []*model.TorrentsTorrentSource
 
-			var hashesToClassify []protocol.ID
+	var torrentPiecesToPersist []*model.TorrentPieces
 
-			flushHashesToClassify := func() {
-				if len(hashesToClassify) > 0 {
-					job, err := processor.NewQueueJob(processor.MessageParams{
-						InfoHashes: hashesToClassify,
-					},
-						// delay the classifier by a minute to allow time for the S/L scrape:
-						model.QueueJobDelayBy(time.Minute),
-					)
-					if err != nil {
-						c.logger.Errorf("error creating queue job: %s", err.Error())
-					} else {
-						queueJobsToPersist = append(queueJobsToPersist, &job)
-					}
-				}
+	var queueJobsToPersist []*model.QueueJob
 
-				hashesToClassify = make([]protocol.ID, 0, classifyBatchSize)
-			}
-			flushHashesToClassify()
+	hashMap := make(map[protocol.ID]infoHashWithMetaInfo, len(is))
 
-			for _, i := range is {
-				if _, ok := hashMap[i.infoHash]; ok {
-					continue
-				}
+	var hashesToClassify []protocol.ID
 
-				hashMap[i.infoHash] = i
-
-				if t, err := createTorrentModel(
-					i.infoHash, i.metaInfo, c.savePieces, c.saveFilesThreshold); err != nil {
-					c.logger.Errorf("error creating torrent model: %s", err.Error())
-					c.countHash(i.source, "persist_refused", 1)
-					delete(hashMap, i.infoHash)
-				} else {
-					for _, f := range t.Files {
-						fc := f
-						torrentFilesToPersist = append(torrentFilesToPersist, &fc)
-					}
-
-					t.Files = nil
-					for _, s := range t.Sources {
-						sc := s
-						torrentSourcesToPersist = append(torrentSourcesToPersist, &sc)
-					}
-
-					t.Sources = nil
-					if c.savePieces {
-						pc := t.Pieces
-						torrentPiecesToPersist = append(torrentPiecesToPersist, &pc)
-						t.Pieces = model.TorrentPieces{}
-					}
-
-					torrentsToPersist = append(torrentsToPersist, &t)
-
-					hashesToClassify = append(hashesToClassify, i.infoHash)
-					if len(hashesToClassify) >= classifyBatchSize {
-						flushHashesToClassify()
-					}
-				}
-			}
-
-			flushHashesToClassify()
-
-			if persistErr := c.dao.Transaction(func(tx *dao.Query) error {
-				if err := tx.WithContext(ctx).Torrent.Clauses(clause.OnConflict{
-					Columns: []clause.Column{{Name: string(c.dao.Torrent.InfoHash.ColumnName())}},
-					DoUpdates: clause.AssignmentColumns([]string{
-						string(c.dao.Torrent.Name.ColumnName()),
-						string(c.dao.Torrent.FilesStatus.ColumnName()),
-						string(c.dao.Torrent.FilesCount.ColumnName()),
-						string(c.dao.Torrent.UpdatedAt.ColumnName()),
-					}),
-				}).CreateInBatches(torrentsToPersist, 100); err != nil {
-					return err
-				}
-				if len(torrentFilesToPersist) > 0 {
-					if err := tx.WithContext(ctx).TorrentFile.Clauses(clause.OnConflict{
-						DoNothing: true,
-					}).CreateInBatches(torrentFilesToPersist, 100); err != nil {
-						return err
-					}
-				}
-				if err := tx.WithContext(ctx).TorrentsTorrentSource.Clauses(clause.OnConflict{
-					DoNothing: true,
-				}).CreateInBatches(torrentSourcesToPersist, 100); err != nil {
-					return err
-				}
-				if c.savePieces {
-					if err := tx.WithContext(ctx).TorrentPieces.Clauses(clause.OnConflict{
-						DoNothing: true,
-					}).CreateInBatches(torrentPiecesToPersist, 10); err != nil {
-						return err
-					}
-				}
-				return tx.WithContext(ctx).QueueJob.CreateInBatches(queueJobsToPersist, 10)
-			}); persistErr != nil {
-				c.logger.Errorf("error persisting torrents: %s", persistErr)
+	flushHashesToClassify := func() {
+		if len(hashesToClassify) > 0 {
+			job, err := processor.NewQueueJob(processor.MessageParams{
+				InfoHashes: hashesToClassify,
+			},
+				// delay the classifier by a minute to allow time for the S/L scrape:
+				model.QueueJobDelayBy(time.Minute),
+			)
+			if err != nil {
+				c.logger.Errorf("error creating queue job: %s", err.Error())
 			} else {
-				c.persistedTotal.With(prometheus.Labels{"entity": "Torrent"}).Add(float64(len(torrentsToPersist)))
-				c.logger.Debugw("persisted torrents", "count", len(torrentsToPersist))
+				queueJobsToPersist = append(queueJobsToPersist, &job)
+			}
+		}
 
-				for _, i := range hashMap {
-					c.countHash(i.source, stagePersisted, 1)
+		hashesToClassify = make([]protocol.ID, 0, classifyBatchSize)
+	}
+	flushHashesToClassify()
 
-					origin := i.source
-					if i.origin != "" {
-						origin = i.origin
-					}
+	for _, i := range is {
+		if _, ok := hashMap[i.infoHash]; ok {
+			continue
+		}
 
-					if !isSampleSource(origin) && !isSampleLookupSource(origin) {
-						continue
-					}
+		hashMap[i.infoHash] = i
 
-					select {
-					case <-ctx.Done():
-						return
-					case c.scrape.In() <- i.nodeHasPeersForHash:
-						continue
-					}
-				}
+		if t, err := createTorrentModel(
+			i.infoHash, i.metaInfo, c.savePieces, c.saveFilesThreshold); err != nil {
+			c.logger.Errorf("error creating torrent model: %s", err.Error())
+			c.countHash(i.source, "persist_refused", 1)
+			delete(hashMap, i.infoHash)
+		} else {
+			for _, f := range t.Files {
+				fc := f
+				torrentFilesToPersist = append(torrentFilesToPersist, &fc)
+			}
+
+			t.Files = nil
+			for _, s := range t.Sources {
+				sc := s
+				torrentSourcesToPersist = append(torrentSourcesToPersist, &sc)
+			}
+
+			t.Sources = nil
+			if c.savePieces {
+				pc := t.Pieces
+				torrentPiecesToPersist = append(torrentPiecesToPersist, &pc)
+				t.Pieces = model.TorrentPieces{}
+			}
+
+			torrentsToPersist = append(torrentsToPersist, &t)
+
+			hashesToClassify = append(hashesToClassify, i.infoHash)
+			if len(hashesToClassify) >= classifyBatchSize {
+				flushHashesToClassify()
+			}
+		}
+	}
+
+	flushHashesToClassify()
+
+	if persistErr := c.dao.Transaction(func(tx *dao.Query) error {
+		if err := tx.WithContext(dbCtx).Torrent.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: string(c.dao.Torrent.InfoHash.ColumnName())}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				string(c.dao.Torrent.Name.ColumnName()),
+				string(c.dao.Torrent.FilesStatus.ColumnName()),
+				string(c.dao.Torrent.FilesCount.ColumnName()),
+				string(c.dao.Torrent.UpdatedAt.ColumnName()),
+			}),
+		}).CreateInBatches(torrentsToPersist, 100); err != nil {
+			return err
+		}
+		if len(torrentFilesToPersist) > 0 {
+			if err := tx.WithContext(dbCtx).TorrentFile.Clauses(clause.OnConflict{
+				DoNothing: true,
+			}).CreateInBatches(torrentFilesToPersist, 100); err != nil {
+				return err
+			}
+		}
+		if err := tx.WithContext(dbCtx).TorrentsTorrentSource.Clauses(clause.OnConflict{
+			DoNothing: true,
+		}).CreateInBatches(torrentSourcesToPersist, 100); err != nil {
+			return err
+		}
+		if c.savePieces {
+			if err := tx.WithContext(dbCtx).TorrentPieces.Clauses(clause.OnConflict{
+				DoNothing: true,
+			}).CreateInBatches(torrentPiecesToPersist, 10); err != nil {
+				return err
+			}
+		}
+		return tx.WithContext(dbCtx).QueueJob.CreateInBatches(queueJobsToPersist, 10)
+	}); persistErr != nil {
+		c.logger.Errorf("error persisting torrents: %s", persistErr)
+	} else {
+		c.persistedTotal.With(prometheus.Labels{"entity": "Torrent"}).Add(float64(len(torrentsToPersist)))
+		c.logger.Debugw("persisted torrents", "count", len(torrentsToPersist))
+
+		for _, i := range hashMap {
+			c.countHash(i.source, stagePersisted, 1)
+
+			origin := i.source
+			if i.origin != "" {
+				origin = i.origin
+			}
+
+			if !forwardToScrape || !isSampleSource(origin) && !isSampleLookupSource(origin) {
+				continue
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case c.scrape.In() <- i.nodeHasPeersForHash:
+				continue
 			}
 		}
 	}
@@ -274,7 +295,20 @@ func createTorrentModel(
 	}, nil
 }
 
-const classifyBatchSize = 100
+const (
+	classifyBatchSize   = 100
+	persistDrainTimeout = 5 * time.Second
+)
+
+func graceContext(ctx context.Context, grace time.Duration) (context.Context, context.CancelFunc) {
+	graceCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(ctx, func() { time.AfterFunc(grace, cancel) })
+
+	return graceCtx, func() {
+		stop()
+		cancel()
+	}
+}
 
 // runPersistSources waits on the persistSources channel for scraped torrents, and persists sources
 // (which includes discovery date, seeders and leechers) to the database in batches.
@@ -282,52 +316,69 @@ func (c *crawler) runPersistSources(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			c.drainPersistSources(ctx)
+
 			return
 		case scrapes := <-c.persistSources.Out():
-			srcs := make([]*model.TorrentsTorrentSource, 0, len(scrapes))
-
-			hashSet := make(map[protocol.ID]struct{}, len(scrapes))
-			for _, s := range scrapes {
-				if _, ok := hashSet[s.infoHash]; ok {
-					continue
-				}
-
-				hashSet[s.infoHash] = struct{}{}
-
-				if src, err := createTorrentSourceModel(s); err != nil {
-					c.logger.Errorf("error creating torrent source model: %s", err.Error())
-				} else {
-					srcs = append(srcs, &src)
-				}
-			}
-
-			if persistErr := c.dao.WithContext(ctx).TorrentsTorrentSource.Clauses(
-				clause.OnConflict{
-					Columns: []clause.Column{
-						{Name: string(c.dao.TorrentsTorrentSource.InfoHash.ColumnName())},
-						{Name: string(c.dao.TorrentsTorrentSource.Source.ColumnName())},
-					},
-					DoUpdates: clause.AssignmentColumns([]string{
-						string(c.dao.TorrentsTorrentSource.Seeders.ColumnName()),
-						string(c.dao.TorrentsTorrentSource.Leechers.ColumnName()),
-						// sets to null, fixes torrents indexed before 0.8.0 with published_at
-						// 0001-01-01 00:00:00+00:
-						string(c.dao.TorrentsTorrentSource.PublishedAt.ColumnName()),
-						string(c.dao.TorrentsTorrentSource.UpdatedAt.ColumnName()),
-					}),
-				},
-			).Where(
-				// check that the torrent record hasn't been deleted:
-				gen.Exists(c.dao.WithContext(ctx).Torrent.Where(
-					c.dao.Torrent.InfoHash.EqCol(c.dao.TorrentsTorrentSource.InfoHash),
-				)),
-			).CreateInBatches(srcs, 100); persistErr != nil {
-				c.logger.Errorf("error persisting torrent sources: %s", persistErr.Error())
-			} else {
-				c.persistedTotal.With(prometheus.Labels{"entity": "TorrentsTorrentSource"}).Add(float64(len(srcs)))
-				c.logger.Debugw("persisted torrent sources", "count", len(srcs))
-			}
+			dbCtx, cancel := graceContext(ctx, persistDrainTimeout)
+			c.persistSourceBatch(dbCtx, scrapes)
+			cancel()
 		}
+	}
+}
+
+func (c *crawler) drainPersistSources(ctx context.Context) {
+	drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistDrainTimeout)
+	defer cancel()
+
+	for _, batch := range c.persistSources.Drain(drainCtx) {
+		c.persistSourceBatch(drainCtx, batch)
+	}
+}
+
+func (c *crawler) persistSourceBatch(ctx context.Context, scrapes []infoHashWithScrape) {
+	srcs := make([]*model.TorrentsTorrentSource, 0, len(scrapes))
+
+	hashSet := make(map[protocol.ID]struct{}, len(scrapes))
+	for _, s := range scrapes {
+		if _, ok := hashSet[s.infoHash]; ok {
+			continue
+		}
+
+		hashSet[s.infoHash] = struct{}{}
+
+		if src, err := createTorrentSourceModel(s); err != nil {
+			c.logger.Errorf("error creating torrent source model: %s", err.Error())
+		} else {
+			srcs = append(srcs, &src)
+		}
+	}
+
+	if persistErr := c.dao.WithContext(ctx).TorrentsTorrentSource.Clauses(
+		clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: string(c.dao.TorrentsTorrentSource.InfoHash.ColumnName())},
+				{Name: string(c.dao.TorrentsTorrentSource.Source.ColumnName())},
+			},
+			DoUpdates: clause.AssignmentColumns([]string{
+				string(c.dao.TorrentsTorrentSource.Seeders.ColumnName()),
+				string(c.dao.TorrentsTorrentSource.Leechers.ColumnName()),
+				// sets to null, fixes torrents indexed before 0.8.0 with published_at
+				// 0001-01-01 00:00:00+00:
+				string(c.dao.TorrentsTorrentSource.PublishedAt.ColumnName()),
+				string(c.dao.TorrentsTorrentSource.UpdatedAt.ColumnName()),
+			}),
+		},
+	).Where(
+		// check that the torrent record hasn't been deleted:
+		gen.Exists(c.dao.WithContext(ctx).Torrent.Where(
+			c.dao.Torrent.InfoHash.EqCol(c.dao.TorrentsTorrentSource.InfoHash),
+		)),
+	).CreateInBatches(srcs, 100); persistErr != nil {
+		c.logger.Errorf("error persisting torrent sources: %s", persistErr.Error())
+	} else {
+		c.persistedTotal.With(prometheus.Labels{"entity": "TorrentsTorrentSource"}).Add(float64(len(srcs)))
+		c.logger.Debugw("persisted torrent sources", "count", len(srcs))
 	}
 }
 

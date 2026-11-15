@@ -18,9 +18,10 @@ import (
 
 type Params struct {
 	fx.In
-	Config    Config
-	Responder responder.Responder
-	Logger    *zap.SugaredLogger
+	Config     Config
+	Responder  responder.Responder
+	Logger     *zap.SugaredLogger
+	SaveNodeID func() `name:"dht_node_id_save" optional:"true"`
 }
 
 type Result struct {
@@ -83,6 +84,10 @@ func New(p Params) Result {
 		}
 		if err := s.start(); err != nil {
 			return nil, fmt.Errorf("could not start server: %w", err)
+		}
+
+		if p.SaveNodeID != nil {
+			p.SaveNodeID()
 		}
 
 		return s, nil

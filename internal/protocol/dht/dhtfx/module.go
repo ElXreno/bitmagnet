@@ -14,10 +14,7 @@ func New() fx.Option {
 		"dht",
 		configfx.NewConfigModule[server.Config]("dht_server", server.NewDefaultConfig()),
 		fx.Provide(
-			fx.Annotated{
-				Name:   "dht_node_id",
-				Target: persistentNodeID,
-			},
+			persistentNodeID,
 			client.New,
 			ktable.New,
 			responder.New,

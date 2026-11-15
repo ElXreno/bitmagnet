@@ -8,11 +8,17 @@ import (
 	"os"
 	"strings"
 	"syscall"
+
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
 )
 
 func classifyDialError(err error) string {
 	if err == nil {
 		return "ok"
+	}
+
+	if errors.Is(err, metainforequester.ErrLimited) {
+		return "limited"
 	}
 
 	var opErr *net.OpError

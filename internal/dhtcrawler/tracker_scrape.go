@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
@@ -124,6 +125,7 @@ type trackerScraper struct {
 	held             map[protocol.ID]int
 	join             joinFunc
 	onHeld           func(hash protocol.ID)
+	draining         atomic.Bool
 	prefix           string
 	hosts            []string
 	mu               sync.Mutex

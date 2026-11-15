@@ -281,6 +281,8 @@ func New(params Params) Result {
 				},
 				OnStop: func(context.Context) error {
 					active.Set(false)
+					c.inbound.leaveAll(time.Duration(envInt("BITMAGNET_INBOUND_LEAVE_SECONDS", 3)) * time.Second)
+
 					if c.stopped != nil {
 						close(c.stopped)
 					}

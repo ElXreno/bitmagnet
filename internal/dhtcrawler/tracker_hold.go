@@ -93,7 +93,7 @@ func (s *trackerScraper) spendToken(index int) []announceJob {
 
 	packets := 0
 
-	for packets == 0 {
+	for packets == 0 && !s.draining.Load() {
 		job, ok := s.nextAnnounce(index)
 		if !ok {
 			break

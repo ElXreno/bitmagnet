@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -138,6 +139,7 @@ type inboundPeers struct {
 	late       map[protocol.ID]*inboundEntry
 	lateOrder  *list.List
 	seq        uint64
+	closing    bool
 }
 
 func listenInbound(port uint16, logger *zap.SugaredLogger) (v4 net.Listener, v6 net.Listener) {
@@ -497,6 +499,8 @@ func (p *inboundPeers) join(s *trackerScraper, index int, hash protocol.ID, seed
 	_, known := p.entries[hash]
 
 	switch {
+	case p.closing:
+		return joinNone
 	case known && s.holding(hash):
 		return joinHeld
 	case known:
@@ -590,6 +594,47 @@ func (p *inboundPeers) forget(hash protocol.ID) string {
 	}
 
 	return ""
+}
+
+// leaveAll queues the stops of every membership, largest swarms first, and waits for the announce loops
+func (p *inboundPeers) leaveAll(timeout time.Duration) {
+	if p == nil {
+		return
+	}
+
+	p.mu.Lock()
+	p.closing = true
+
+	entries := append([]*inboundEntry(nil), p.weakest...)
+	sort.Slice(entries, func(a, b int) bool { return entries[a].seeders > entries[b].seeders })
+
+	for _, entry := range entries {
+		p.leave(entry)
+	}
+
+	p.mu.Unlock()
+
+	for _, scraper := range p.trackers {
+		scraper.draining.Store(true)
+	}
+
+	pending := func() int {
+		queued := 0
+
+		for _, scraper := range p.trackers {
+			for _, stops := range scraper.stops {
+				queued += len(stops)
+			}
+		}
+
+		return queued
+	}
+
+	for deadline := time.Now().Add(timeout); pending() > 0 && time.Now().Before(deadline); {
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	p.c.logger.Infow("left the swarms held for incoming peers", "swarms", len(entries), "stops_unsent", pending())
 }
 
 func (p *inboundPeers) announced(hash protocol.ID) {

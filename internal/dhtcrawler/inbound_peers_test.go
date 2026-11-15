@@ -2,6 +2,7 @@ package dhtcrawler
 
 import (
 	"bytes"
+	"container/list"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -490,6 +491,17 @@ func TestAnnounceTokenBuysTwoPackets(t *testing.T) {
 
 	if len(s.stops[0]) != 8 {
 		t.Fatalf("a full stop queue must drop, not block: %d queued", len(s.stops[0]))
+	}
+
+	for len(s.stops[0]) > 1 {
+		<-s.stops[0]
+	}
+
+	s.announces[0][0] <- first
+	s.draining.Store(true)
+
+	if jobs := s.spendToken(0); len(jobs) != 1 || !jobs[0].stop || len(s.announces[0][0]) != 1 {
+		t.Fatalf("a draining scraper sends stops only, got %+v", jobs)
 	}
 
 	var off *trackerScraper
@@ -1321,14 +1333,24 @@ func TestInboundSwitchAndTrackerMembership(t *testing.T) {
 	startedDelay.Store(0)
 	quiet("after the last membership")
 
-	if sent(c, tracker.SentStarted) != 4 || sent(c, tracker.SentStopped) != 5 {
+	c.trackers.submit(protocol.ID{6, 6, 6})
+	next(2, protocol.ID{6, 6, 6}, port)
+	peersFed(protocol.ID{6, 6, 6})
+	c.inbound.leaveAll(3 * time.Second)
+	next(3, protocol.ID{6, 6, 6}, port)
+
+	if c.inbound.size() != 0 || c.inbound.join(c.trackers, 0, protocol.ID{5, 5, 5}, 9) != joinNone {
+		t.Fatal("after leaving every swarm nothing may be held")
+	}
+
+	if sent(c, tracker.SentStarted) != 5 || sent(c, tracker.SentStopped) != 6 {
 		t.Fatalf("want one started and one stopped per hash plus the second stop after the late start, got %v and %v",
 			sent(c, tracker.SentStarted), sent(c, tracker.SentStopped))
 	}
 
 	for stage, want := range map[string]float64{
-		stageInboundRegistered:  4,
-		"announced":             3,
+		stageInboundRegistered:  5,
+		"announced":             4,
 		"outgoing_failed":       1,
 		stageInboundExpired:     1,
 		stageInboundFetchedOut:  1,
@@ -1364,5 +1386,47 @@ func TestInboundSwitchAndTrackerMembership(t *testing.T) {
 
 	if silenced.inbound != nil {
 		t.Fatal("without tracker announces the feature must stay off")
+	}
+}
+
+func BenchmarkInboundJoinWhenFull(b *testing.B) {
+	for _, size := range []int{2000, 20000} {
+		c := newTestCrawler(nil, nil)
+		c.fetched = &ignoreFilter{bloom: boom.NewStableBloomFilter(1000, 2, 0.001)}
+
+		p := &inboundPeers{
+			c:         c,
+			config:    inboundConfig{maxHashes: size, hold: time.Hour, lateMax: 50_000, lateTTL: time.Hour},
+			now:       time.Now,
+			entries:   make(map[protocol.ID]*inboundEntry),
+			late:      make(map[protocol.ID]*inboundEntry),
+			lateOrder: list.New(),
+		}
+
+		s := offlineScraper(1)
+		s.enableHolds(protocol.ID{}, 1, size, p.join)
+		p.trackers = []*trackerScraper{s}
+
+		hash := func(n int) (id protocol.ID) {
+			binary.BigEndian.PutUint64(id[:], uint64(n+1)*0x9e3779b97f4a7c15)
+
+			return id
+		}
+
+		for n := range size {
+			p.join(s, 0, hash(n), uint32(n%50+1))
+		}
+
+		next := size
+
+		b.Run(fmt.Sprintf("%d", size), func(b *testing.B) {
+			for range b.N {
+				next++
+
+				if p.join(s, 0, hash(next), uint32(1000+next)) != joinMember {
+					b.Fatal("the stronger hash was refused")
+				}
+			}
+		})
 	}
 }

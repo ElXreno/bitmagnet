@@ -228,6 +228,10 @@ func (r requester) request(
 		return failed("pieces_failed", readAllPiecesErr)
 	}
 
+	if bencodeUnsafe(pieces, incomingMaxDepth) {
+		return failed("bad_metainfo", errIncomingBencode)
+	}
+
 	parsed, parseErr := metainfo.ParseMetaInfoBytes(infoHash, pieces)
 	if parseErr != nil {
 		return failed("bad_metainfo", parseErr)
@@ -384,15 +388,6 @@ const (
 	metadataPieceSize = 16 * 1024
 )
 
-func exHandshake(rw io.ReadWriter) (metadataSize uint, utMetadata uint8, err error) {
-	handshake, handshakeErr := readExHandshake(rw)
-	if handshakeErr != nil {
-		return 0, 0, handshakeErr
-	}
-
-	return handshake.metadata()
-}
-
 func readExHandshake(rw io.ReadWriter) (*rootDict, error) {
 	if !pipelinedHandshake {
 		if _, writeErr := rw.Write([]byte(extendedHandshake)); writeErr != nil {
@@ -418,6 +413,10 @@ func readExHandshakeDict(r io.Reader) (*rootDict, error) {
 	// Extension Handshake has the Extension Message id = 0x00
 	if rExMessage[1] != 0 {
 		return nil, errors.New("first extension message is not an extension handshake")
+	}
+
+	if bencodeUnsafe(rExMessage[2:], incomingMaxDepth) {
+		return nil, errIncomingBencode
 	}
 
 	rRootDict := new(rootDict)
@@ -468,6 +467,10 @@ func readAllPieces(r io.Reader, metadataSize uint) ([]byte, error) {
 			return nil, err
 		}
 		// run TestDecoder() function in leech_test.go in case you have any doubts.
+		if bencodeUnsafe(rUmMessage[2:], incomingMaxDepth) {
+			return nil, errIncomingBencode
+		}
+
 		rMessageBuf := bytes.NewBuffer(rUmMessage[2:])
 		rExtDict := new(extDict)
 

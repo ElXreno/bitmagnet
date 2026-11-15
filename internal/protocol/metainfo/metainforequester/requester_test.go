@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -53,6 +54,23 @@ func TestReadAllPieces(t *testing.T) {
 
 		if _, err := readAllPieces(bytes.NewReader(stream), size); err == nil {
 			t.Errorf("%s: want an error", name)
+		}
+	}
+}
+
+func TestHostileBencodeIsRefusedBeforeDecoding(t *testing.T) {
+	t.Parallel()
+
+	huge := "d1:v134217727:xe"
+	deep := strings.Repeat("l", incomingMaxDepth+1) + strings.Repeat("e", incomingMaxDepth+1)
+
+	for name, dict := range map[string]string{"string longer than the message": huge, "nesting": "d1:x" + deep + "e"} {
+		if _, err := readExHandshake(discardWriter{bytes.NewReader(message(0, dict, nil))}); !errors.Is(err, errIncomingBencode) {
+			t.Errorf("extended handshake, %s: got %v", name, err)
+		}
+
+		if _, err := readAllPieces(bytes.NewReader(message(1, dict, nil)), 100); !errors.Is(err, errIncomingBencode) {
+			t.Errorf("ut_metadata message, %s: got %v", name, err)
 		}
 	}
 }

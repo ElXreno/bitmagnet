@@ -21,16 +21,17 @@ const (
 	sourceInboundPeer   = "inbound_peer"
 	inboundConnsPerHash = 4
 
-	stageInboundRegistered   = "registered"
-	stageInboundReplaced     = "replaced"
-	stageInboundSkippedFull  = "skipped_full"
-	stageInboundUnknownHash  = "unknown_hash"
-	stageInboundHandshake    = "handshake_failed"
-	stageInboundNoMetaInfo   = "peer_no_metainfo"
-	stageInboundFetchFailed  = "fetch_failed"
-	stageInboundBusy         = "busy"
-	stageInboundConnAccepted = "conn_accepted"
-	stageInboundConnRejected = "conn_rejected"
+	stageInboundRegistered    = "registered"
+	stageInboundReplaced      = "replaced"
+	stageInboundSkippedFull   = "skipped_full"
+	stageInboundUnknownHash   = "unknown_hash"
+	stageInboundHandshake     = "handshake_failed"
+	stageInboundNoMetaInfo    = "peer_no_metainfo"
+	stageInboundFetchFailed   = "fetch_failed"
+	stageInboundBusy          = "busy"
+	stageInboundClosedNetwork = "closed_network"
+	stageInboundConnAccepted  = "conn_accepted"
+	stageInboundConnRejected  = "conn_rejected"
 )
 
 type inboundConfig struct {
@@ -280,6 +281,10 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 	res, err := in.Fetch()
 
 	switch {
+	case errors.Is(err, metainforequester.ErrClosedNetworkPeer):
+		c.countHash(sourceInboundPeer, stageInboundClosedNetwork, 1)
+
+		return classifyDialError(err)
 	case errors.Is(err, metainforequester.ErrIncomingHandshake):
 		c.countHash(sourceInboundPeer, stageInboundHandshake, 1)
 

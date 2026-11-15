@@ -165,6 +165,12 @@ func (in *Incoming) Fetch() (Response, error) {
 
 	peerClientTotal.With(prometheus.Labels{"client": peerClient, "stage": "inbound_handshake"}).Inc()
 
+	if clientid.ClosedNetwork(peerClient) {
+		outcome("closed_network")
+
+		return Response{}, ErrClosedNetworkPeer
+	}
+
 	messages := &incomingMessages{r: in.rw}
 
 	handshake, handshakeErr := readExHandshakeDict(messages)

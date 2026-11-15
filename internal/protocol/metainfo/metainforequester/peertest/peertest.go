@@ -24,9 +24,11 @@ var PeerID = [20]byte([]byte("-qB4650-peertestpeer"))
 
 type Peer struct {
 	InfoHash     [20]byte
+	ID           [20]byte
 	Metadata     []byte
 	Encrypted    bool
 	NoExtensions bool
+	Silent       bool
 	Prelude      []byte
 }
 
@@ -79,9 +81,14 @@ func (p Peer) Dial(addr string) (Seen, error) {
 		reserved[5] = 0x10
 	}
 
+	id := p.ID
+	if id == [20]byte{} {
+		id = PeerID
+	}
+
 	handshake := append([]byte(protocolName), reserved[:]...)
 	handshake = append(handshake, p.InfoHash[:]...)
-	handshake = append(handshake, PeerID[:]...)
+	handshake = append(handshake, id[:]...)
 
 	if _, err = rw.Write(handshake); err != nil {
 		return seen, err
@@ -98,6 +105,12 @@ func (p Peer) Dial(addr string) (Seen, error) {
 
 	copy(seen.Reserved[:], reply[20:28])
 	copy(seen.PeerID[:], reply[48:68])
+
+	if p.Silent {
+		_, err = io.Copy(io.Discard, rw)
+
+		return seen, err
+	}
 
 	offer := fmt.Sprintf("d1:md11:ut_metadatai%dee", utMetadata)
 	if p.Metadata != nil {

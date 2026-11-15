@@ -328,6 +328,30 @@ func TestBencodeUnsafe(t *testing.T) {
 	}
 }
 
+func TestReceiveLeavesClosedNetworkPeers(t *testing.T) {
+	t.Parallel()
+
+	metadata, hash := testMetadata(t, "closed")
+
+	for name, id := range map[string]string{"xt": "-XT1000-04d9f58343e2", "cc": "-CC1000-c87f546c72f4"} {
+		started := time.Now()
+
+		got := receive(t, peertest.Peer{InfoHash: hash, ID: [20]byte([]byte(id)), Silent: true}, nil)
+		if !errors.Is(got.err, ErrClosedNetworkPeer) {
+			t.Fatalf("%s: want ErrClosedNetworkPeer, got %v", name, got.err)
+		}
+
+		if waited := time.Since(started); waited > 2*time.Second {
+			t.Fatalf("%s: waited %s for a peer that never sends an extended handshake", name, waited)
+		}
+
+		got = receive(t, peertest.Peer{InfoHash: hash, ID: [20]byte([]byte(id)), Metadata: metadata}, nil)
+		if !errors.Is(got.err, ErrClosedNetworkPeer) || got.seen.Requests != 0 {
+			t.Fatalf("%s: want no request to a closed network peer, got %v", name, got.err)
+		}
+	}
+}
+
 func TestReceiveBudget(t *testing.T) {
 	t.Parallel()
 

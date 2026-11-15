@@ -536,6 +536,11 @@ func TestInboundRefusesWhatItCannotUse(t *testing.T) {
 			peertest.Peer{InfoHash: hash, Metadata: metadata, NoExtensions: true},
 			stageInboundHandshake, "no_extension_protocol",
 		},
+		{
+			"closed network",
+			peertest.Peer{InfoHash: hash, ID: [20]byte([]byte("-XT1000-04d9f58343e2")), Silent: true},
+			stageInboundClosedNetwork, "closed_network_peer",
+		},
 	} {
 		_, _ = test.peer.Dial(i.address())
 

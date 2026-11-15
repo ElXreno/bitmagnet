@@ -8,6 +8,7 @@ import (
 	"expvar"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"sync"
 	"time"
@@ -23,27 +24,29 @@ const (
 	sourceInboundPeer   = "inbound_peer"
 	inboundConnsPerHash = 4
 
-	stageInboundRegistered    = "registered"
-	stageInboundReplaced      = "replaced"
-	stageInboundSkippedFull   = "skipped_full"
-	stageInboundExpired       = "expired"
-	stageInboundFetchedOut    = "fetched_outgoing"
-	stageInboundUnknownHash   = "unknown_hash"
-	stageInboundActiveConn    = "active_conn"
-	stageInboundLateConn      = "late_conn"
-	stageInboundHandshake     = "handshake_failed"
-	stageInboundNoMetaInfo    = "peer_no_metainfo"
-	stageInboundFetchFailed   = "fetch_failed"
-	stageInboundBusy          = "busy"
-	stageInboundClosedNetwork = "closed_network"
-	stageInboundConnAccepted  = "conn_accepted"
-	stageInboundConnRejected  = "conn_rejected"
+	stageInboundRegistered     = "registered"
+	stageInboundReplaced       = "replaced"
+	stageInboundSkippedFull    = "skipped_full"
+	stageInboundExpired        = "expired"
+	stageInboundFetchedOut     = "fetched_outgoing"
+	stageInboundUnknownHash    = "unknown_hash"
+	stageInboundActiveConn     = "active_conn"
+	stageInboundLateConn       = "late_conn"
+	stageInboundHandshake      = "handshake_failed"
+	stageInboundNoMetaInfo     = "peer_no_metainfo"
+	stageInboundFetchFailed    = "fetch_failed"
+	stageInboundBusy           = "busy"
+	stageInboundClosedNetwork  = "closed_network"
+	stageInboundConnAccepted   = "conn_accepted"
+	stageInboundConnRejected   = "conn_rejected"
+	stageInboundConnRejectedIP = "conn_rejected_ip"
 )
 
 type inboundConfig struct {
 	maxHashes int
 	hold      time.Duration
 	maxConns  int
+	maxPerIP  int
 	lateMax   int
 	lateTTL   time.Duration
 	dht       bool
@@ -61,6 +64,7 @@ func inboundConfigFromEnv() (inboundConfig, bool) {
 		maxHashes: envInt("BITMAGNET_INBOUND_MAX_HASHES", 2*announcesPerSecond*holdSeconds),
 		hold:      time.Duration(holdSeconds) * time.Second,
 		maxConns:  envInt("BITMAGNET_INBOUND_MAX_CONNS", 500),
+		maxPerIP:  envInt("BITMAGNET_INBOUND_MAX_CONNS_PER_IP", 8),
 		lateMax:   envInt("BITMAGNET_INBOUND_LATE_HASHES", 50_000),
 		lateTTL:   time.Duration(envInt("BITMAGNET_INBOUND_LATE_SECONDS", 900)) * time.Second,
 		dht:       os.Getenv("BITMAGNET_INBOUND_DHT") == "on",
@@ -125,6 +129,8 @@ type inboundPeers struct {
 	dhtQueue   chan protocol.ID
 	dhtTargets []inboundDHTTarget
 	slots      chan struct{}
+	ipMu       sync.Mutex
+	perIP      map[netip.Addr]int
 	now        func() time.Time
 	mu         sync.Mutex
 	entries    map[protocol.ID]*inboundEntry
@@ -177,6 +183,7 @@ func (c *crawler) openInboundPeers(config inboundConfig, receiver metainforeques
 		receiver:  receiver,
 		listeners: []net.Listener{v4},
 		slots:     make(chan struct{}, config.maxConns),
+		perIP:     make(map[netip.Addr]int),
 		now:       time.Now,
 		entries:   make(map[protocol.ID]*inboundEntry),
 		late:      make(map[protocol.ID]*inboundEntry),
@@ -274,12 +281,22 @@ func (p *inboundPeers) serve(ctx context.Context, listener net.Listener) {
 			continue
 		}
 
+		host := inboundHost(conn.RemoteAddr())
+		if !p.admit(host) {
+			p.c.countHash(sourceInboundPeer, stageInboundConnRejectedIP, 1)
+
+			_ = conn.Close()
+
+			continue
+		}
+
 		select {
 		case p.slots <- struct{}{}:
 			p.c.countHash(sourceInboundPeer, stageInboundConnAccepted, 1)
 
-			go p.handle(ctx, conn)
+			go p.handle(ctx, conn, host)
 		default:
+			p.depart(host)
 			p.c.countHash(sourceInboundPeer, stageInboundConnRejected, 1)
 
 			_ = conn.Close()
@@ -287,7 +304,53 @@ func (p *inboundPeers) serve(ctx context.Context, listener net.Listener) {
 	}
 }
 
-func (p *inboundPeers) handle(ctx context.Context, conn net.Conn) {
+// one IPv6 host owns a whole /64
+func inboundHost(addr net.Addr) netip.Addr {
+	tcpAddr, ok := addr.(*net.TCPAddr)
+	if !ok {
+		return netip.Addr{}
+	}
+
+	host := tcpAddr.AddrPort().Addr().Unmap()
+
+	if prefix, err := host.Prefix(64); err == nil && host.Is6() {
+		return prefix.Addr()
+	}
+
+	return host
+}
+
+func (p *inboundPeers) admit(host netip.Addr) bool {
+	if p.config.maxPerIP <= 0 {
+		return true
+	}
+
+	p.ipMu.Lock()
+	defer p.ipMu.Unlock()
+
+	if p.perIP[host] >= p.config.maxPerIP {
+		return false
+	}
+
+	p.perIP[host]++
+
+	return true
+}
+
+func (p *inboundPeers) depart(host netip.Addr) {
+	if p.config.maxPerIP <= 0 {
+		return
+	}
+
+	p.ipMu.Lock()
+	defer p.ipMu.Unlock()
+
+	if p.perIP[host]--; p.perIP[host] <= 0 {
+		delete(p.perIP, host)
+	}
+}
+
+func (p *inboundPeers) handle(ctx context.Context, conn net.Conn, host netip.Addr) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			p.c.countHash(sourceInboundPeer, "panic", 1)
@@ -297,6 +360,7 @@ func (p *inboundPeers) handle(ctx context.Context, conn net.Conn) {
 
 	defer func() {
 		<-p.slots
+		p.depart(host)
 	}()
 
 	defer conn.Close()

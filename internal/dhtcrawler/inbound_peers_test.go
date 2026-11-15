@@ -809,6 +809,66 @@ func TestInboundConnectionCaps(t *testing.T) {
 	i.nothingPersisted(t)
 }
 
+func TestInboundCapPerHost(t *testing.T) {
+	t.Parallel()
+
+	i := newInboundTest(t, inboundConfig{maxHashes: 10, hold: time.Minute, maxConns: 10, maxPerIP: 2}, offlineScraper(1))
+	silent := make([]net.Conn, 0, 2)
+
+	for range 2 {
+		conn, err := (&net.Dialer{}).DialContext(context.Background(), "tcp4", i.address())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		defer conn.Close()
+
+		silent = append(silent, conn)
+	}
+
+	eventually(t, "two connections of one host", func() bool { return len(i.inbound.slots) == 2 })
+
+	refused, err := (&net.Dialer{}).DialContext(context.Background(), "tcp4", i.address())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer refused.Close()
+
+	_ = refused.SetDeadline(time.Now().Add(time.Second))
+
+	if _, err = refused.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("a third connection of the same host must be closed at once, got %v", err)
+	}
+
+	if hashCount(t, i.crawler, sourceInboundPeer, stageInboundConnRejectedIP) != 1 ||
+		hashCount(t, i.crawler, sourceInboundPeer, stageInboundConnRejected) != 0 || len(i.inbound.slots) != 2 {
+		t.Fatal("want the refusal counted for the host, not for the global cap")
+	}
+
+	_ = silent[0].Close()
+
+	eventually(t, "the host to get a slot back", func() bool { return len(i.inbound.slots) == 1 })
+
+	metadata, hash := inboundMetadata(t, "per host")
+	i.join(hash, 7)
+
+	if _, err = (peertest.Peer{InfoHash: hash, Metadata: metadata}).Dial(i.address()); err != nil {
+		t.Fatal(err)
+	}
+
+	i.persisted(t)
+
+	near := inboundHost(&net.TCPAddr{IP: net.ParseIP("2001:db8:1:2:aaaa::1"), Port: 1})
+	same := inboundHost(&net.TCPAddr{IP: net.ParseIP("2001:db8:1:2:bbbb::2"), Port: 2})
+	other := inboundHost(&net.TCPAddr{IP: net.ParseIP("2001:db8:1:3::1"), Port: 1})
+	mapped := inboundHost(&net.TCPAddr{IP: net.ParseIP("::ffff:192.0.2.7"), Port: 1})
+
+	if near != same || near == other || mapped != netip.MustParseAddr("192.0.2.7") {
+		t.Fatalf("hosts: %s %s %s %s", near, same, other, mapped)
+	}
+}
+
 func TestInboundBannedAndPanickingChecks(t *testing.T) {
 	t.Parallel()
 
@@ -1078,6 +1138,7 @@ func TestInboundSwitchAndTrackerMembership(t *testing.T) {
 	t.Setenv("BITMAGNET_INBOUND_DHT", "")
 	t.Setenv("BITMAGNET_INBOUND_LATE_HASHES", "")
 	t.Setenv("BITMAGNET_INBOUND_LATE_SECONDS", "")
+	t.Setenv("BITMAGNET_INBOUND_MAX_CONNS_PER_IP", "")
 
 	receiver := metainforequester.NewReceiver(protocol.RandomPeerID(), 2*time.Second)
 	metadata, hash := inboundMetadata(t, "held")
@@ -1194,7 +1255,7 @@ func TestInboundSwitchAndTrackerMembership(t *testing.T) {
 	}
 
 	if got := c.inbound.config; got != (inboundConfig{
-		maxHashes: 60, hold: time.Second, maxConns: 3, lateMax: 50_000, lateTTL: 15 * time.Minute,
+		maxHashes: 60, hold: time.Second, maxConns: 3, maxPerIP: 8, lateMax: 50_000, lateTTL: 15 * time.Minute,
 	}) {
 		t.Fatalf("want room for two trackers announcing 30 hashes a second for the hold of one second, got %+v", got)
 	}

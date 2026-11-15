@@ -52,6 +52,7 @@ type crawler struct {
 	failed                       *failedHashes
 	failedSeeded                 *failedHashes
 	closedSwarms                 *failedHashes
+	aliases                      *failedHashes
 	inbound                      *inboundPeers
 	infoHashTriage               concurrency.BatchingChannel[nodeHasPeersForHash]
 	getPeers                     concurrency.BufferedConcurrentChannel[nodeHasPeersForHash]
@@ -235,7 +236,7 @@ func (c *crawler) saveFailedHashes(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-time.After(time.Minute):
-			for _, memory := range []*failedHashes{c.failed, c.failedSeeded, c.closedSwarms} {
+			for _, memory := range []*failedHashes{c.failed, c.failedSeeded, c.closedSwarms, c.aliases} {
 				if err := memory.save(); err != nil {
 					c.logger.Errorf("failed to save the failed info hash memory: %s", err.Error())
 				}

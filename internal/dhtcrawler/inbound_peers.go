@@ -460,18 +460,20 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 	}
 
 	origin := p.origin(entry)
+	persist := nodeHasPeersForHash{
+		infoHash: in.InfoHash,
+		node:     origin.node,
+		source:   sourceInboundPeer,
+		origin:   origin.source,
+	}
+
+	if !c.persistAs(&persist, res.Identity) {
+		return "ok_alias"
+	}
 
 	select {
 	case <-ctx.Done():
-	case c.persistTorrents.In() <- infoHashWithMetaInfo{
-		nodeHasPeersForHash: nodeHasPeersForHash{
-			infoHash: in.InfoHash,
-			node:     origin.node,
-			source:   sourceInboundPeer,
-			origin:   origin.source,
-		},
-		metaInfo: res.Info,
-	}:
+	case c.persistTorrents.In() <- infoHashWithMetaInfo{nodeHasPeersForHash: persist, metaInfo: res.Info}:
 	}
 
 	if res.Encrypted {

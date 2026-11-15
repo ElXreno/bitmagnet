@@ -2,18 +2,21 @@ package dhtcrawler
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/netip"
 	"sync/atomic"
 	"testing"
 
+	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	boom "github.com/tylertreat/BoomFilters"
 )
 
 type closedNetworkRequester struct {
@@ -177,5 +180,84 @@ func TestClosedNetworkPeerDialResult(t *testing.T) {
 		if got := classifyDialError(err); got != "closed_network_peer" {
 			t.Errorf("%s: got %s", name, got)
 		}
+	}
+}
+
+func TestPersistAsFollowsTheIdentity(t *testing.T) {
+	t.Parallel()
+
+	alias, canonical := protocol.ID{1}, protocol.ID{2}
+
+	c := newTestCrawler(nil, nil)
+	c.fetched = &ignoreFilter{bloom: boom.NewStableBloomFilter(1000, 2, 0.001)}
+
+	req := nodeHasPeersForHash{infoHash: alias, source: sourceSample}
+	if !c.persistAs(&req, metainfo.Identity{InfoHash: alias, Kind: metainfo.KindV1}) || req.infoHash != alias {
+		t.Fatal("a v1 torrent is stored under the hash it was fetched for")
+	}
+
+	req = nodeHasPeersForHash{infoHash: alias, source: sourceSample}
+	if !c.persistAs(&req, metainfo.Identity{InfoHash: alias, Kind: metainfo.KindV2}) || req.infoHash != alias {
+		t.Fatal("a v2 only torrent is stored under its v2 hash")
+	}
+
+	req = nodeHasPeersForHash{infoHash: alias, source: sourceSample}
+	if !c.persistAs(&req, metainfo.Identity{InfoHash: canonical, Kind: metainfo.KindHybridV2}) || req.infoHash != canonical {
+		t.Fatal("a hybrid torrent fetched under its v2 hash is stored under its v1 hash")
+	}
+
+	if !c.fetched.test(canonical) {
+		t.Fatal("the v1 hash of a hybrid torrent counts as fetched")
+	}
+
+	req = nodeHasPeersForHash{infoHash: alias, source: sourceSample}
+	if c.persistAs(&req, metainfo.Identity{InfoHash: canonical, Kind: metainfo.KindHybridV2}) {
+		t.Fatal("a hybrid torrent whose v1 hash was just fetched is not stored twice")
+	}
+}
+
+func TestCreateTorrentModelReadsTheV2FileTree(t *testing.T) {
+	t.Parallel()
+
+	tree := "9:file treed1:ad0:d6:lengthi10e11:pieces root32:rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrree" +
+		"3:dird1:bd0:d6:lengthi20e11:pieces root32:sssssssssssssssssssssssssssssssseeee"
+	multi := "d" + tree + "12:meta versioni2e4:name4:test12:piece lengthi16384ee"
+	single := "d9:file treed4:testd0:d6:lengthi10e11:pieces root32:rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrreee" +
+		"12:meta versioni2e4:name4:test12:piece lengthi16384ee"
+
+	v2Hash := func(info string) protocol.ID {
+		sum := sha256.Sum256([]byte(info))
+
+		return protocol.ID(sum[:20])
+	}
+
+	info, _, err := metainfo.ParseMetaInfo(v2Hash(multi), []byte(multi))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	torrent, err := createTorrentModel(v2Hash(multi), info, false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if torrent.Size != 30 || torrent.FilesStatus != model.FilesStatusMulti || len(torrent.Files) != 2 ||
+		torrent.Files[0].Path != "a" || torrent.Files[0].Size != 10 ||
+		torrent.Files[1].Path != "dir/b" || torrent.Files[1].Size != 20 {
+		t.Fatalf("multi file v2 torrent: %+v", torrent)
+	}
+
+	info, _, err = metainfo.ParseMetaInfo(v2Hash(single), []byte(single))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	torrent, err = createTorrentModel(v2Hash(single), info, false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if torrent.Size != 10 || torrent.FilesStatus != model.FilesStatusSingle || len(torrent.Files) != 0 {
+		t.Fatalf("single file v2 torrent: %+v", torrent)
 	}
 }

@@ -100,6 +100,7 @@ type HandshakeInfo struct {
 type Response struct {
 	HandshakeInfo
 	Info      metainfo.Info
+	Identity  metainfo.Identity
 	Encrypted bool
 	Transport string
 }
@@ -232,7 +233,7 @@ func (r requester) request(
 		return failed("bad_metainfo", errIncomingBencode)
 	}
 
-	parsed, parseErr := metainfo.ParseMetaInfoBytes(infoHash, pieces)
+	parsed, identity, parseErr := metainfo.ParseMetaInfo(infoHash, pieces)
 	if parseErr != nil {
 		return failed("bad_metainfo", parseErr)
 	}
@@ -242,6 +243,7 @@ func (r requester) request(
 	return Response{
 		HandshakeInfo: hsInfo,
 		Info:          parsed,
+		Identity:      identity,
 		Transport:     transport,
 	}, nil
 }

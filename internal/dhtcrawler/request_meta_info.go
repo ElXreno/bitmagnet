@@ -10,6 +10,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/clientid"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/server"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -86,14 +87,42 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 		}
 
 		c.trackerOutcome(req.infoHash, stageMetaInfoOK)
+
+		persist := req.nodeHasPeersForHash
+		if !c.persistAs(&persist, mi.Identity) {
+			return
+		}
+
 		select {
 		case <-ctx.Done():
 		case c.persistTorrents.In() <- infoHashWithMetaInfo{
-			nodeHasPeersForHash: req.nodeHasPeersForHash,
+			nodeHasPeersForHash: persist,
 			metaInfo:            mi.Info,
 		}:
 		}
 	})
+}
+
+// persistAs points a fetched hash at the hash its torrent is stored under and reports whether to store it.
+func (c *crawler) persistAs(req *nodeHasPeersForHash, identity metainfo.Identity) bool {
+	switch identity.Kind {
+	case metainfo.KindV2:
+		c.countHash(req.source, stageMetaInfoOK+"_v2", 1)
+	case metainfo.KindHybridV2:
+		c.countHash(req.source, stageMetaInfoOK+"_hybrid_v2", 1)
+		c.aliases.add(req.infoHash)
+
+		if c.fetched.test(identity.InfoHash) {
+			c.countHash(req.source, "alias_of_fetched", 1)
+
+			return false
+		}
+
+		c.fetched.add(identity.InfoHash)
+		req.infoHash = identity.InfoHash
+	}
+
+	return true
 }
 
 const metaInfoParallelDials = 4

@@ -58,6 +58,8 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 
 const metaInfoParallelDials = 4
 
+var utpForSilentPeers = os.Getenv("BITMAGNET_UTP_SILENT_PEERS") == "1"
+
 var dialEveryPeer = os.Getenv("BITMAGNET_DIAL_EVERY_PEER") == "1"
 
 func (c *crawler) doRequestMetaInfo(
@@ -67,9 +69,10 @@ func (c *crawler) doRequestMetaInfo(
 	peers []netip.AddrPort,
 ) (metainforequester.Response, error) {
 	type dialResult struct {
-		res  metainforequester.Response
-		err  error
-		addr netip.AddrPort
+		res    metainforequester.Response
+		err    error
+		silent bool
+		addr   netip.AddrPort
 	}
 
 	dialCtx, cancel := context.WithCancel(ctx)
@@ -165,7 +168,12 @@ func (c *crawler) doRequestMetaInfo(
 			inflight++
 
 			go func() {
-				res, err := c.metainfoRequester.Request(dialCtx, hash, cand.addr)
+				requestCtx := dialCtx
+				if cand.ping == "ok" || utpForSilentPeers {
+					requestCtx = metainforequester.WithUTPFallback(dialCtx)
+				}
+
+				res, err := c.metainfoRequester.Request(requestCtx, hash, cand.addr)
 				outcome := dialOutcome(err)
 
 				if outcome == "timeout" || outcome == "refused" || outcome == "unreachable" {
@@ -178,7 +186,7 @@ func (c *crawler) doRequestMetaInfo(
 					c.probeTotal.With(prometheus.Labels{"prev": cand.prev, "ping": cand.ping, "dial": outcome}).Inc()
 				}
 
-				results <- dialResult{res: res, err: err, addr: cand.addr}
+				results <- dialResult{res: res, err: err, silent: cand.ping != "ok", addr: cand.addr}
 			}()
 		}
 
@@ -190,7 +198,14 @@ func (c *crawler) doRequestMetaInfo(
 		inflight--
 
 		result := classifyDialError(r.err)
-		if r.err == nil && r.res.Encrypted {
+		switch {
+		case r.err == nil && r.res.Transport == "utp" && r.silent:
+			result = "ok_utp_silent"
+		case r.err == nil && r.res.Transport == "utp":
+			result = "ok_utp"
+		case r.silent && result == "utp_dial_failed":
+			result = "utp_silent_dial_failed"
+		case r.err == nil && r.res.Encrypted:
 			result = "ok_mse"
 		}
 
@@ -235,7 +250,7 @@ func peerKey(p netip.AddrPort) protocol.ID {
 
 func dialOutcome(err error) string {
 	switch result := classifyDialError(err); result {
-	case "dial_timeout":
+	case "dial_timeout", "utp_dial_failed":
 		return "timeout"
 	case "dial_refused":
 		return "refused"

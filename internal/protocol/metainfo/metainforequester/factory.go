@@ -1,6 +1,7 @@
 package metainforequester
 
 import (
+	"github.com/anacrolix/utp"
 	"net"
 	"os"
 	"strconv"
@@ -33,7 +34,18 @@ type Result struct {
 }
 
 func New(p Params) Result {
+	var utpSocket *utp.Socket
+
+	if os.Getenv("BITMAGNET_UTP") != "off" {
+		if socket, err := utp.NewSocket("udp4", ":0"); err == nil {
+			utpSocket = socket
+		} else {
+			p.Logger.Warnf("uTP is unavailable: %s", err.Error())
+		}
+	}
+
 	collector := newPrometheusCollector(requester{
+		utp:      utpSocket,
 		clientID: protocol.RandomPeerID(),
 		timeout:  p.Config.RequestTimeout,
 		dialer: &net.Dialer{

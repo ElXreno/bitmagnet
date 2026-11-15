@@ -17,6 +17,7 @@ import (
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/mse"
 	"github.com/anacrolix/torrent/peer_protocol"
+	"github.com/anacrolix/utp"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
 )
@@ -29,7 +30,17 @@ type requester struct {
 	clientID protocol.ID
 	timeout  time.Duration
 	dialer   *net.Dialer
+	utp      *utp.Socket
 }
+
+type utpFallbackKey struct{}
+
+// WithUTPFallback lets requests made with the returned context retry over uTP when the TCP dial times out.
+func WithUTPFallback(ctx context.Context) context.Context {
+	return context.WithValue(ctx, utpFallbackKey{}, true)
+}
+
+const utpDialTimeout = 2 * time.Second
 
 type ExtensionBit uint
 
@@ -85,6 +96,7 @@ type Response struct {
 	HandshakeInfo
 	Info      metainfo.Info
 	Encrypted bool
+	Transport string
 }
 
 var errPlainHandshakeClosed = errors.New("peer closed the connection during the plaintext handshake")
@@ -114,8 +126,32 @@ func (r requester) request(
 	timeoutCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
-	conn, connErr := r.connect(timeoutCtx, addr)
-	if connErr != nil {
+	var conn net.Conn
+
+	transport := "tcp"
+
+	tcpConn, connErr := r.connect(timeoutCtx, addr)
+
+	switch {
+	case connErr == nil:
+		conn = tcpConn
+	case r.utp != nil && ctx.Value(utpFallbackKey{}) != nil && addr.Addr().Is4() && isDialTimeout(connErr):
+		utpCtx, utpCancel := context.WithTimeout(timeoutCtx, utpDialTimeout)
+		utpConn, utpErr := r.utp.DialContext(utpCtx, "udp4", addr.String())
+
+		utpCancel()
+
+		if utpErr != nil {
+			return Response{}, fmt.Errorf("utp dial: %w", utpErr)
+		}
+
+		if deadline, ok := timeoutCtx.Deadline(); ok {
+			_ = utpConn.SetDeadline(deadline)
+		}
+
+		conn = utpConn
+		transport = "utp"
+	default:
 		return Response{}, connErr
 	}
 
@@ -166,7 +202,14 @@ func (r requester) request(
 	return Response{
 		HandshakeInfo: hsInfo,
 		Info:          parsed,
+		Transport:     transport,
 	}, nil
+}
+
+func isDialTimeout(err error) bool {
+	var netErr net.Error
+
+	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout())
 }
 
 func (r requester) connect(ctx context.Context, addr netip.AddrPort) (conn *net.TCPConn, err error) {

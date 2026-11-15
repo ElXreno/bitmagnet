@@ -74,10 +74,10 @@ func newFamilyTestCrawler(ipv6 bool, cl client.Client) *crawler {
 	tables := ktable.New(ktable.Params{NodeID: protocol.RandomNodeID()})
 	c := newTestCrawler(nil, nil)
 	c.client = cl
-	c.v4 = newNodeFamily("", tables.Table, 1)
+	c.v4 = newNodeFamily("", tables.Table, 1, 40)
 
 	if ipv6 {
-		c.v6 = newNodeFamily("6", tables.Table6, 1)
+		c.v6 = newNodeFamily("6", tables.Table6, 1, 40)
 		c.v6.discovered = make(chan ktable.Node, 100)
 	}
 

@@ -48,7 +48,7 @@ func (allowAll) Check(metainfo.Info) error { return nil }
 
 func newTestCrawler(alive map[netip.AddrPort]bool, good map[netip.AddrPort]bool) *crawler {
 	return &crawler{
-		v4:                newNodeFamily("", nil, 1),
+		v4:                newNodeFamily("", nil, 1, 40),
 		client:            fakeClient{alive: alive},
 		metainfoRequester: fakeRequester{good: good},
 		banningChecker:    allowAll{},

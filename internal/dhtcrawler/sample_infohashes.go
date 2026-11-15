@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
 )
 
@@ -53,6 +54,7 @@ func (c *crawler) runSampleInfoHashes(ctx context.Context, f *nodeFamily) {
 			}
 		}
 
+		c.countSampledNode(f, n.ID(), res.Num, res.Interval, len(res.Samples), len(discoveredHashes))
 		c.countHash(source, stageDiscovered, len(discoveredHashes))
 		c.countHash(source, stageDuplicate, len(res.Samples)-len(discoveredHashes))
 
@@ -100,4 +102,42 @@ func (c *crawler) runSampleInfoHashes(ctx context.Context, f *nodeFamily) {
 			}()
 		}
 	})
+}
+
+// countSampledNode records how wide and how deep sampling reaches: whether the node was seen before in this
+// run, how many info hashes it says it stores and how many new ones the visit produced.
+func (c *crawler) countSampledNode(
+	f *nodeFamily, id protocol.ID, stored int, interval int, samples int, fresh int,
+) {
+	visit := "first"
+	if f.sampledNodes.testAndAdd(id) {
+		visit = "repeat"
+	}
+
+	source := "sample_nodes" + f.suffix
+
+	c.countHash(source, visit, 1)
+	c.countHash(source, "new_from_"+visit, fresh)
+	c.countHash(source, "samples_from_"+visit, samples)
+	c.countHash(source, "stored_sum", stored)
+
+	switch {
+	case stored <= 20:
+		c.countHash(source, "stored_le_20", 1)
+	case stored <= 100:
+		c.countHash(source, "stored_21_100", 1)
+	case stored <= 1000:
+		c.countHash(source, "stored_101_1000", 1)
+	default:
+		c.countHash(source, "stored_gt_1000", 1)
+	}
+
+	switch {
+	case interval <= 60:
+		c.countHash(source, "interval_le_60s", 1)
+	case interval <= 3600:
+		c.countHash(source, "interval_le_1h", 1)
+	default:
+		c.countHash(source, "interval_gt_1h", 1)
+	}
 }

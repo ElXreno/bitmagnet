@@ -142,14 +142,17 @@ func New(params Params) Result {
 						trackers6 = nil
 					}
 
+					sampleConcurrency := envInt("BITMAGNET_SAMPLE_CONCURRENCY", 40*scalingFactor)
+
 					var v6 *nodeFamily
 					if cl.IPv6() {
-						v6 = newNodeFamily("6", params.KTable6, scalingFactor)
+						v6 = newNodeFamily("6", params.KTable6, scalingFactor,
+							envInt("BITMAGNET_SAMPLE_CONCURRENCY6", sampleConcurrency))
 						v6.discovered = make(chan ktable.Node, 100*scalingFactor)
 					}
 
 					c = crawler{
-						v4:                           newNodeFamily("", params.KTable, scalingFactor),
+						v4:                           newNodeFamily("", params.KTable, scalingFactor, sampleConcurrency),
 						v6:                           v6,
 						client:                       cl,
 						metainfoRequester:            params.MetainfoRequester,

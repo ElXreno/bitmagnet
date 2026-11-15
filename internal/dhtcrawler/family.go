@@ -17,11 +17,12 @@ type nodeFamily struct {
 	nodesForFindNode         concurrency.BufferedConcurrentChannel[ktable.Node]
 	nodesForSampleInfoHashes concurrency.BufferedConcurrentChannel[ktable.Node]
 	ignoreNodes              *ignoreFilter
+	sampledNodes             *ignoreFilter
 	nodePool                 *nodePool
 	discovered               chan ktable.Node
 }
 
-func newNodeFamily(suffix string, kTable ktable.Table, scalingFactor int) *nodeFamily {
+func newNodeFamily(suffix string, kTable ktable.Table, scalingFactor int, sampleConcurrency int) *nodeFamily {
 	return &nodeFamily{
 		suffix: suffix,
 		kTable: kTable,
@@ -30,11 +31,14 @@ func newNodeFamily(suffix string, kTable ktable.Table, scalingFactor int) *nodeF
 		nodesForFindNode: concurrency.NewBufferedConcurrentChannel[ktable.Node](
 			10*scalingFactor, 10*scalingFactor),
 		nodesForSampleInfoHashes: concurrency.NewBufferedConcurrentChannel[ktable.Node](
-			40*scalingFactor,
-			40*scalingFactor,
+			sampleConcurrency,
+			sampleConcurrency,
 		),
 		ignoreNodes: &ignoreFilter{
 			bloom: boom.NewStableBloomFilter(200_000*uint(scalingFactor), 2, 0.001),
+		},
+		sampledNodes: &ignoreFilter{
+			bloom: boom.NewStableBloomFilter(20_000_000, 2, 0.001),
 		},
 		nodePool: newNodePool(),
 	}

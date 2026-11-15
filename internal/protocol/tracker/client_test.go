@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -260,6 +261,65 @@ func TestAnnounceStartAndStop(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("the tracker never saw the stopped event")
+	}
+}
+
+func TestOnSendSeesEveryPacket(t *testing.T) {
+	t.Parallel()
+
+	addr, _ := fakeTrackerWithEvents(t, false)
+
+	client, err := NewClient("udp4", []string{"127.0.0.1:9", addr}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = client.Close() })
+
+	var mu sync.Mutex
+
+	sent := map[string]int{}
+	client.OnSend = func(index int, kind string) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if index != 1 {
+			t.Errorf("packet %s went to tracker %d", kind, index)
+		}
+
+		sent[kind]++
+	}
+
+	ctx := context.Background()
+
+	if _, err = client.Scrape(ctx, 1, []protocol.ID{{1}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err = client.Announce(ctx, 1, protocol.ID{1}, AnnounceParams{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err = client.AnnounceStart(ctx, 1, protocol.ID{2}, AnnounceParams{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err = client.AnnounceStop(ctx, 1, protocol.ID{2}, AnnounceParams{}); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	want := map[string]int{SentConnect: 1, SentScrape: 1, SentStarted: 2, SentStopped: 2}
+	for kind, count := range want {
+		if sent[kind] != count {
+			t.Errorf("%s: want %d packets, got %d", kind, count, sent[kind])
+		}
+	}
+
+	if len(sent) != len(want) {
+		t.Errorf("unexpected kinds: %v", sent)
 	}
 }
 

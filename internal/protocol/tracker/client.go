@@ -50,9 +50,25 @@ type Client struct {
 	trackers []*trackerState
 	mu       sync.Mutex
 	pending  map[uint32]chan []byte
+	// OnSend sees every packet sent; set it before the first request
+	OnSend func(index int, kind string)
+}
+
+const (
+	SentConnect = "connect"
+	SentScrape  = "scrape"
+	SentStarted = "started"
+	SentStopped = "stopped"
+)
+
+func (c *Client) sent(index int, kind string) {
+	if c.OnSend != nil {
+		c.OnSend(index, kind)
+	}
 }
 
 type trackerState struct {
+	index        int
 	host         string
 	mu           sync.Mutex
 	addr         *net.UDPAddr
@@ -75,8 +91,8 @@ func NewClient(network string, hosts []string, timeout time.Duration) (*Client, 
 		pending: make(map[uint32]chan []byte),
 	}
 
-	for _, host := range hosts {
-		c.trackers = append(c.trackers, &trackerState{host: host})
+	for index, host := range hosts {
+		c.trackers = append(c.trackers, &trackerState{index: index, host: host})
 	}
 
 	go c.read()
@@ -195,6 +211,8 @@ func (c *Client) connection(ctx context.Context, t *trackerState) (*net.UDPAddr,
 	binary.BigEndian.PutUint32(request[8:12], actionConnect)
 	binary.BigEndian.PutUint32(request[12:16], transactionID)
 
+	c.sent(t.index, SentConnect)
+
 	response, err := c.roundTrip(ctx, t.addr, transactionID, request)
 	if err != nil {
 		return nil, 0, err
@@ -232,6 +250,8 @@ func (c *Client) Scrape(ctx context.Context, index int, hashes []protocol.ID) ([
 	for _, hash := range hashes {
 		request = append(request, hash[:]...)
 	}
+
+	c.sent(index, SentScrape)
 
 	response, err := c.roundTrip(ctx, addr, transactionID, request)
 	if err != nil {
@@ -313,6 +333,8 @@ func (c *Client) Announce(
 		return AnnounceResult{}, err
 	}
 
+	c.sent(index, SentStopped)
+
 	_, _ = c.conn.WriteToUDP(
 		c.announceRequest(connectionID, newTransactionID(), hash, params, eventStopped, 0), addr)
 
@@ -339,6 +361,8 @@ func (c *Client) AnnounceStop(ctx context.Context, index int, hash protocol.ID, 
 		return err
 	}
 
+	c.sent(index, SentStopped)
+
 	_, err = c.conn.WriteToUDP(
 		c.announceRequest(connectionID, newTransactionID(), hash, params, eventStopped, 0), addr)
 
@@ -359,6 +383,8 @@ func (c *Client) started(
 	}
 
 	transactionID := newTransactionID()
+
+	c.sent(index, SentStarted)
 
 	response, err := c.roundTrip(
 		ctx, addr, transactionID,

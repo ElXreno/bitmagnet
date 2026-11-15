@@ -1,12 +1,16 @@
 package workercmd
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/worker"
 	"github.com/urfave/cli/v2"
 	"go.uber.org/fx"
 )
+
+const workersStopTimeout = 12 * time.Second
 
 type Params struct {
 	fx.In
@@ -48,7 +52,10 @@ func New(p Params) (Result, error) {
 					return nil
 				},
 				After: func(ctx *cli.Context) error {
-					return p.Workers.Stop(ctx.Context)
+					stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx.Context), workersStopTimeout)
+					defer cancel()
+
+					return p.Workers.Stop(stopCtx)
 				},
 			},
 			{

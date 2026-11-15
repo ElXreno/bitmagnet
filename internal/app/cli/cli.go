@@ -53,21 +53,34 @@ func New(p Params) (Result, error) {
 
 	app.Setup()
 
+	runCtx, stopRun := context.WithCancel(context.Background())
+	finished := make(chan struct{})
+
 	p.Lifecycle.Append(fx.Hook{
 		OnStart: func(context.Context) error {
-			// todo: Fix!
 			//nolint:contextcheck
 			go (func() {
+				defer close(finished)
 				// the following hack fixes a weird bug where the CLI does not terminate when calling
 				// with just --help
 				args := p.Args
 				if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
 					args = []string{args[0]}
 				}
-				if err := app.RunContext(context.Background(), args); err != nil {
+				if err := app.RunContext(runCtx, args); err != nil {
 					panic(err)
 				}
 			})()
+			return nil
+		},
+		OnStop: func(ctx context.Context) error {
+			stopRun()
+
+			select {
+			case <-finished:
+			case <-ctx.Done():
+			}
+
 			return nil
 		},
 	})

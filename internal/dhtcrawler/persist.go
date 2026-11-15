@@ -2,6 +2,7 @@ package dhtcrawler
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
@@ -160,6 +161,9 @@ func createTorrentModel(
 	saveFilesThreshold uint,
 ) (model.Torrent, error) {
 	name := info.BestName()
+	if name == "" || info.PieceLength == 0 {
+		return model.Torrent{}, errors.New("refusing to persist a torrent without meta info")
+	}
 
 	private := false
 	if info.Private != nil {

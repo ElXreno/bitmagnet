@@ -13,12 +13,16 @@ import (
 
 var errBanned = errors.New("banned")
 
+var errNoCandidates = errors.New("no peers worth dialing")
+
 func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 	_ = c.requestMetaInfo.Run(ctx, func(req infoHashWithPeers) {
 		mi, reqErr := c.doRequestMetaInfo(ctx, req.source, req.infoHash, req.peers)
 		if reqErr != nil {
 			if errors.Is(reqErr, errBanned) {
 				c.countHash(req.source, stageBanned, 1)
+			} else if errors.Is(reqErr, errNoCandidates) {
+				c.countHash(req.source, "no_candidates", 1)
 			} else {
 				c.countHash(req.source, stageMetaInfoFail, 1)
 			}
@@ -158,6 +162,10 @@ func (c *crawler) doRequestMetaInfo(
 		}
 
 		return r.res, nil
+	}
+
+	if len(errs) == 0 {
+		return metainforequester.Response{}, errNoCandidates
 	}
 
 	return metainforequester.Response{}, errors.Join(errs...)

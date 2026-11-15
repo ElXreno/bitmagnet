@@ -76,7 +76,12 @@ func (s *socket) Send(remoteAddr netip.AddrPort, data []byte) error {
 		return addrErr
 	}
 
-	return unix.Sendto(s.fd, data, 0, sAddr)
+	sendErr := unix.Sendto(s.fd, data, unix.MSG_DONTWAIT, sAddr)
+	if errors.Is(sendErr, unix.EAGAIN) {
+		return ErrSendBufferFull
+	}
+
+	return sendErr
 }
 
 func (s *socket) Receive(data []byte) (int, netip.AddrPort, error) {

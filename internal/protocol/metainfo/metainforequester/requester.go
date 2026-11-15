@@ -202,19 +202,22 @@ func (r requester) connect(ctx context.Context, addr netip.AddrPort) (conn *net.
 	return tcpConn, nil
 }
 
+const extendedHandshake = "\x00\x00\x00\x1a\x14\x00d1:md11:ut_metadatai1eee"
+
 var myExBits = NewPeerExtensionBits(ExtensionBitDht, ExtensionBitLtep)
 
 func btHandshake(rw io.ReadWriter, infoHash protocol.ID, clientID protocol.ID) (HandshakeInfo, error) {
-	handshakeBytes := make([]byte, 0, 68)
+	handshakeBytes := make([]byte, 0, 68+len(extendedHandshake))
 	handshakeBytes = append(handshakeBytes, peer_protocol.Protocol...)
 	handshakeBytes = append(handshakeBytes, myExBits[:]...)
 	handshakeBytes = append(handshakeBytes, infoHash[:]...)
 	handshakeBytes = append(handshakeBytes, clientID[:]...)
+	handshakeBytes = append(handshakeBytes, extendedHandshake...)
 
 	if n, hsErr := rw.Write(handshakeBytes); hsErr != nil {
 		return HandshakeInfo{}, hsErr
-	} else if n != 68 {
-		panic("handshake bytes must have length 68")
+	} else if n != len(handshakeBytes) {
+		return HandshakeInfo{}, io.ErrShortWrite
 	}
 
 	handshakeResponse := make([]byte, 68)
@@ -270,11 +273,6 @@ type extDict struct {
 const maxMetadataSize = 10 * 1024 * 1024
 
 func exHandshake(rw io.ReadWriter) (metadataSize uint, utMetadata uint8, err error) {
-	if _, writeErr := rw.Write([]byte("\x00\x00\x00\x1a\x14\x00d1:md11:ut_metadatai1eee")); err != nil {
-		err = writeErr
-		return
-	}
-
 	rExMessage, readErr := readExMessage(rw)
 	if readErr != nil {
 		err = readErr

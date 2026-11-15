@@ -170,7 +170,12 @@ func (r requester) request(
 }
 
 func (r requester) connect(ctx context.Context, addr netip.AddrPort) (conn *net.TCPConn, err error) {
-	c, dialErr := r.dialer.DialContext(ctx, "tcp4", addr.String())
+	network := "tcp4"
+	if addr.Addr().Is6() && !addr.Addr().Is4In6() {
+		network = "tcp6"
+	}
+
+	c, dialErr := r.dialer.DialContext(ctx, network, addr.String())
 	if dialErr != nil {
 		err = dialErr
 		return

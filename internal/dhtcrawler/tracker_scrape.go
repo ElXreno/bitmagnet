@@ -29,6 +29,14 @@ const (
 	trackerAnnounceNumWant  = 30
 )
 
+var defaultTrackers6 = []string{
+	"open.stealth.si:80",
+	"tracker.torrent.eu.org:451",
+	"open.demonii.com:1337",
+	"tracker.qu.ax:6969",
+	"tracker-udp.gbitt.info:80",
+}
+
 var defaultTrackers = []string{
 	"tracker.opentrackr.org:1337",
 	"open.stealth.si:80",
@@ -102,16 +110,22 @@ type trackerScraper struct {
 	announceEnabled  bool
 	announceLimiters []*rate.Limiter
 	announceParams   tracker.AnnounceParams
-	onPeers          func(ctx context.Context, hash protocol.ID, seeders uint32, peers []netip.AddrPort)
+	onPeers          func(ctx context.Context, hash protocol.ID, source string, peers []netip.AddrPort)
+	prefix           string
+	hosts            []string
 	mu               sync.Mutex
 	cache            *lru.LRU[protocol.ID, trackerInfo]
 	metrics          trackerMetrics
 }
 
-func newTrackerScraper(metrics trackerMetrics) (*trackerScraper, error) {
-	hosts := defaultTrackers
+// newTrackerScraper builds the scraper for one address family: network is "udp4" or "udp6".
+func newTrackerScraper(metrics trackerMetrics, network string) (*trackerScraper, error) {
+	hosts, env, prefix, suffix := defaultTrackers, "BITMAGNET_TRACKERS", "tracker", ""
+	if network == "udp6" {
+		hosts, env, prefix, suffix = defaultTrackers6, "BITMAGNET_TRACKERS6", "tracker6", "/v6"
+	}
 
-	switch configured := os.Getenv("BITMAGNET_TRACKERS"); configured {
+	switch configured := os.Getenv(env); configured {
 	case "":
 	case "off":
 		return nil, nil //nolint:nilnil
@@ -119,7 +133,7 @@ func newTrackerScraper(metrics trackerMetrics) (*trackerScraper, error) {
 		hosts = strings.Split(configured, ",")
 	}
 
-	client, err := tracker.NewClient(hosts, trackerScrapeTimeout)
+	client, err := tracker.NewClient(network, hosts, trackerScrapeTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +145,14 @@ func newTrackerScraper(metrics trackerMetrics) (*trackerScraper, error) {
 		limiters[i] = rate.NewLimiter(rate.Limit(packetsPerSecond), packetsPerSecond)
 	}
 
+	labels := make([]string, len(hosts))
+	for i, host := range hosts {
+		labels[i] = host + suffix
+	}
+
 	scraper := &trackerScraper{
+		prefix:   prefix,
+		hosts:    labels,
 		client:   client,
 		limiters: limiters,
 		in:       make(chan protocol.ID, 100*tracker.MaxScrapeHashes),
@@ -248,7 +269,7 @@ func (s *trackerScraper) run(ctx context.Context) {
 func (s *trackerScraper) scrapeBatch(ctx context.Context, hashes []protocol.ID) {
 	var wg sync.WaitGroup
 
-	for i, host := range s.client.Trackers() {
+	for i, host := range s.hosts {
 		if !s.limiters[i].Allow() {
 			s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "rate_limited"}).Inc()
 
@@ -292,7 +313,7 @@ func (s *trackerScraper) scrapeBatch(ctx context.Context, hashes []protocol.ID) 
 		}
 
 		priority := announcePriority(info.seeders)
-		swarm := trackerSource(info.seeders)
+		swarm := s.prefix + trackerSource(info.seeders)
 		queued := false
 
 		for offset := range len(s.announces) {
@@ -408,7 +429,7 @@ func (s *trackerScraper) nextAnnounce(index int) (protocol.ID, trackerInfo, bool
 }
 
 func (s *trackerScraper) runAnnounces(ctx context.Context, index int) {
-	host := s.client.Trackers()[index]
+	host := s.hosts[index]
 
 	for {
 		if err := s.announceLimiters[index].Wait(ctx); err != nil {
@@ -438,7 +459,7 @@ func (s *trackerScraper) announce(ctx context.Context, index int, host string, h
 		s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_ok"}).Inc()
 
 		if s.onPeers != nil {
-			s.onPeers(ctx, hash, seeders, result.Peers)
+			s.onPeers(ctx, hash, s.prefix+trackerSource(seeders), result.Peers)
 		}
 	case err == nil:
 		s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_no_peers"}).Inc()
@@ -452,19 +473,17 @@ func (s *trackerScraper) announce(ctx context.Context, index int, host string, h
 func trackerSource(seeders uint32) string {
 	switch {
 	case seeders >= 20:
-		return "tracker_20"
+		return "_20"
 	case seeders >= 5:
-		return "tracker_5_19"
+		return "_5_19"
 	case seeders >= 2:
-		return "tracker_2_4"
+		return "_2_4"
 	default:
-		return "tracker_1"
+		return "_1"
 	}
 }
 
-func (c *crawler) trackerPeers(ctx context.Context, hash protocol.ID, seeders uint32, peers []netip.AddrPort) {
-	source := trackerSource(seeders)
-
+func (c *crawler) trackerPeers(ctx context.Context, hash protocol.ID, source string, peers []netip.AddrPort) {
 	c.countHash(source, stageDiscovered, 1)
 	c.countHash(source, stagePeersSum, len(peers))
 

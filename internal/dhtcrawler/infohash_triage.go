@@ -113,6 +113,7 @@ func (c *crawler) runInfoHashTriage(
 
 					c.countHash(r.source, stageNeedsMetaInfo, 1)
 					c.trackers.submit(r.infoHash)
+					c.trackers6.submit(r.infoHash)
 
 					sendOne := time.Now()
 

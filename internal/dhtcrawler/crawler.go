@@ -44,6 +44,7 @@ type crawler struct {
 	nodePool                     *nodePool
 	pingCache                    *pingCache
 	trackers                     *trackerScraper
+	trackers6                    *trackerScraper
 	fetched                      *ignoreFilter
 	failed                       *failedHashes
 	nodesForPing                 concurrency.BufferedConcurrentChannel[ktable.Node]
@@ -100,7 +101,12 @@ func (c *crawler) start() {
 		c.trackers.onPeers = c.trackerPeers
 	}
 
+	if c.trackers6 != nil {
+		c.trackers6.onPeers = c.trackerPeers
+	}
+
 	go c.trackers.run(ctx)
+	go c.trackers6.run(ctx)
 	go c.runRequestMetaInfo(ctx)
 	go c.runScrape(ctx)
 	go c.reseedBootstrapNodes(ctx)

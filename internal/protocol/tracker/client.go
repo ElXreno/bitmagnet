@@ -44,6 +44,7 @@ type ScrapeResult struct {
 
 // Client speaks the UDP tracker protocol (BEP 15) to a fixed set of trackers over one socket.
 type Client struct {
+	network  string
 	conn     *net.UDPConn
 	timeout  time.Duration
 	trackers []*trackerState
@@ -60,13 +61,15 @@ type trackerState struct {
 	connectedAt  time.Time
 }
 
-func NewClient(hosts []string, timeout time.Duration) (*Client, error) {
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{})
+// NewClient opens one socket of the given network, "udp4" or "udp6"; trackers are resolved for that family.
+func NewClient(network string, hosts []string, timeout time.Duration) (*Client, error) {
+	conn, err := net.ListenUDP(network, &net.UDPAddr{})
 	if err != nil {
 		return nil, err
 	}
 
 	c := &Client{
+		network: network,
 		conn:    conn,
 		timeout: timeout,
 		pending: make(map[uint32]chan []byte),
@@ -172,7 +175,7 @@ func (c *Client) connection(ctx context.Context, t *trackerState) (*net.UDPAddr,
 	defer t.mu.Unlock()
 
 	if t.addr == nil || time.Since(t.resolvedAt) > resolveTTL {
-		addr, err := net.ResolveUDPAddr("udp4", t.host)
+		addr, err := net.ResolveUDPAddr(c.network, t.host)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -331,7 +334,12 @@ func (c *Client) Announce(
 	_, _ = c.conn.WriteToUDP(
 		c.announceRequest(connectionID, newTransactionID(), hash, params, eventStopped, 0), addr)
 
-	if binary.BigEndian.Uint32(response[0:4]) != actionAnnounce || len(response) < 20 || (len(response)-20)%6 != 0 {
+	entry := 6
+	if c.network == "udp6" {
+		entry = 18
+	}
+
+	if binary.BigEndian.Uint32(response[0:4]) != actionAnnounce || len(response) < 20 || (len(response)-20)%entry != 0 {
 		return AnnounceResult{}, ErrResponse
 	}
 
@@ -341,9 +349,9 @@ func (c *Client) Announce(
 		Seeders:  binary.BigEndian.Uint32(response[16:20]),
 	}
 
-	for i := 20; i+6 <= len(response); i += 6 {
-		ip, _ := netip.AddrFromSlice(response[i : i+4])
-		port := binary.BigEndian.Uint16(response[i+4 : i+6])
+	for i := 20; i+entry <= len(response); i += entry {
+		ip, _ := netip.AddrFromSlice(response[i : i+entry-2])
+		port := binary.BigEndian.Uint16(response[i+entry-2 : i+entry])
 
 		if port != 0 && ip.IsValid() && !ip.IsUnspecified() {
 			result.Peers = append(result.Peers, netip.AddrPortFrom(ip, port))

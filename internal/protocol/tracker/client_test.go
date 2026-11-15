@@ -101,7 +101,7 @@ func fakeTrackerWithEvents(t *testing.T, refuse bool) (string, chan uint32) {
 func TestScrape(t *testing.T) {
 	t.Parallel()
 
-	client, err := NewClient([]string{fakeTracker(t, false)}, time.Second)
+	client, err := NewClient("udp4", []string{fakeTracker(t, false)}, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestScrapeErrors(t *testing.T) {
 
 	t.Cleanup(func() { _ = silent.Close() })
 
-	client, err := NewClient([]string{silent.LocalAddr().String(), fakeTracker(t, true)}, 200*time.Millisecond)
+	client, err := NewClient("udp4", []string{silent.LocalAddr().String(), fakeTracker(t, true)}, 200*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestAnnounce(t *testing.T) {
 
 	addr, events := fakeTrackerWithEvents(t, false)
 
-	client, err := NewClient([]string{addr}, time.Second)
+	client, err := NewClient("udp4", []string{addr}, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -129,9 +129,16 @@ func New(params Params) Result {
 						}
 					}
 
-					trackers, err := newTrackerScraper(trackerMetrics)
+					trackers, err := newTrackerScraper(trackerMetrics, "udp4")
 					if err != nil {
 						return err
+					}
+
+					trackers6, err := newTrackerScraper(trackerMetrics, "udp6")
+					if err != nil {
+						params.Logger.Warnf("IPv6 trackers are unavailable: %s", err.Error())
+
+						trackers6 = nil
 					}
 
 					c = crawler{
@@ -156,6 +163,7 @@ func New(params Params) Result {
 						probeTotal:    probeTotal,
 						lookupQueries: lookupQueries,
 						trackers:      trackers,
+						trackers6:     trackers6,
 						failed:        failed,
 						fetched: &ignoreFilter{
 							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),

@@ -2,6 +2,8 @@ package metainforequester
 
 import (
 	"net"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/concurrency"
@@ -35,7 +37,7 @@ func New(p Params) Result {
 		clientID: protocol.RandomPeerID(),
 		timeout:  p.Config.RequestTimeout,
 		dialer: &net.Dialer{
-			Timeout:   2 * time.Second,
+			Timeout:   dialTimeout(),
 			KeepAlive: -1,
 		},
 	})
@@ -59,4 +61,12 @@ func New(p Params) Result {
 		LimiterWaitSeconds:  limiterWaitSeconds,
 		LimiterResultTotal:  limiterResultTotal,
 	}
+}
+
+func dialTimeout() time.Duration {
+	if ms, err := strconv.Atoi(os.Getenv("BITMAGNET_DIAL_TIMEOUT_MS")); err == nil && ms > 0 {
+		return time.Duration(ms) * time.Millisecond
+	}
+
+	return 2 * time.Second
 }

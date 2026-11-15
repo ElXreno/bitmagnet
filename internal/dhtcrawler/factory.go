@@ -199,7 +199,7 @@ func New(params Params) Result {
 						persistTorrents: concurrency.NewBatchingChannel[infoHashWithMetaInfo](
 							1000,
 							1000,
-							time.Minute,
+							5*time.Second,
 						),
 						persistSources: concurrency.NewBatchingChannel[infoHashWithScrape](
 							1000,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
@@ -65,7 +66,35 @@ func (c *crawler) doRequestMetaInfo(
 			inflight++
 
 			go func() {
+				prev := "new"
+				if c.deadPeers.test(peerKey(p)) {
+					prev = "dead"
+				}
+
+				pinged := make(chan string, 1)
+
+				go func() {
+					pingCtx, pingCancel := context.WithTimeout(ctx, peerProbeTimeout)
+					defer pingCancel()
+
+					if _, pingErr := c.client.Ping(pingCtx, p); pingErr != nil {
+						pinged <- "fail"
+					} else {
+						pinged <- "ok"
+					}
+				}()
+
 				res, err := c.metainfoRequester.Request(dialCtx, hash, p)
+				outcome := dialOutcome(err)
+
+				if outcome == "timeout" || outcome == "refused" || outcome == "unreachable" {
+					c.deadPeers.add(peerKey(p))
+				}
+
+				if outcome != "skipped" {
+					c.probeTotal.With(prometheus.Labels{"prev": prev, "ping": <-pinged, "dial": outcome}).Inc()
+				}
+
 				results <- dialResult{res: res, err: err}
 			}()
 		}
@@ -100,4 +129,32 @@ func (c *crawler) doRequestMetaInfo(
 	}
 
 	return metainforequester.Response{}, errors.Join(errs...)
+}
+
+const peerProbeTimeout = 1500 * time.Millisecond
+
+func peerKey(p netip.AddrPort) protocol.ID {
+	var id protocol.ID
+
+	b, _ := p.MarshalBinary()
+	copy(id[:], b)
+
+	return id
+}
+
+func dialOutcome(err error) string {
+	switch result := classifyDialError(err); result {
+	case "dial_timeout":
+		return "timeout"
+	case "dial_refused":
+		return "refused"
+	case "dial_unreachable", "dial_other":
+		return "unreachable"
+	case "limited", "canceled":
+		return "skipped"
+	case "ok":
+		return "ok"
+	default:
+		return "connected"
+	}
 }

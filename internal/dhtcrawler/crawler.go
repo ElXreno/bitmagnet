@@ -38,6 +38,8 @@ type crawler struct {
 	hashesTotal                  *prometheus.CounterVec
 	dialsTotal                   *prometheus.CounterVec
 	stageGauge                   *prometheus.GaugeVec
+	probeTotal                   *prometheus.CounterVec
+	deadPeers                    *ignoreFilter
 	nodesForPing                 concurrency.BufferedConcurrentChannel[ktable.Node]
 	nodesForFindNode             concurrency.BufferedConcurrentChannel[ktable.Node]
 	nodesForSampleInfoHashes     concurrency.BufferedConcurrentChannel[ktable.Node]

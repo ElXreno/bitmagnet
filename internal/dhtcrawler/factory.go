@@ -47,6 +47,7 @@ type Result struct {
 	HashesTotal    prometheus.Collector `group:"prometheus_collectors"`
 	DialsTotal     prometheus.Collector `group:"prometheus_collectors"`
 	StageGauge     prometheus.Collector `group:"prometheus_collectors"`
+	ProbeTotal     prometheus.Collector `group:"prometheus_collectors"`
 }
 
 func New(params Params) Result {
@@ -72,6 +73,12 @@ func New(params Params) Result {
 		Name:      "stage_load",
 		Help:      "Queued items and busy workers of each pipeline stage.",
 	}, []string{"stage", "kind"})
+	probeTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bitmagnet",
+		Subsystem: "dht_crawler",
+		Name:      "peer_probe_total",
+		Help:      "Meta info dials by earlier failure of the address, DHT ping result and dial outcome.",
+	}, []string{"prev", "ping", "dial"})
 	dialsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "bitmagnet",
 		Subsystem: "dht_crawler",
@@ -117,6 +124,10 @@ func New(params Params) Result {
 						hashesTotal: hashesTotal,
 						dialsTotal:  dialsTotal,
 						stageGauge:  stageGauge,
+						probeTotal:  probeTotal,
+						deadPeers: &ignoreFilter{
+							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
+						},
 						nodesForPing: concurrency.NewBufferedConcurrentChannel[ktable.Node](
 							scalingFactor, scalingFactor),
 						nodesForFindNode: concurrency.NewBufferedConcurrentChannel[ktable.Node](
@@ -185,6 +196,7 @@ func New(params Params) Result {
 		HashesTotal:      hashesTotal,
 		DialsTotal:       dialsTotal,
 		StageGauge:       stageGauge,
+		ProbeTotal:       probeTotal,
 		DhtCrawlerActive: active,
 	}
 }

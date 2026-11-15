@@ -12,6 +12,8 @@ func (c *crawler) runInboundHashes(ctx context.Context) {
 			return
 		case h := <-c.inboundHashes:
 			if c.inboundSeen.testAndAdd(h.InfoHash) {
+				c.countHash(h.Query, stageDuplicate, 1)
+
 				continue
 			}
 

@@ -64,6 +64,7 @@ func (l prometheusCollector) Respond(ctx context.Context, msg dht.RecvMsg) (dht.
 		l.querySuccessTotal.With(labels).Inc()
 	} else {
 		l.queryErrorTotal.With(labels).Inc()
+		errorReasonTotal.With(prometheus.Labels{labelQuery: labels[labelQuery], "reason": errorReason(err)}).Inc()
 	}
 
 	return ret, err

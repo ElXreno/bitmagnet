@@ -8,14 +8,25 @@ import (
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+var errBanned = errors.New("banned")
 
 func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 	_ = c.requestMetaInfo.Run(ctx, func(req infoHashWithPeers) {
-		mi, reqErr := c.doRequestMetaInfo(ctx, req.infoHash, req.peers)
+		mi, reqErr := c.doRequestMetaInfo(ctx, req.source, req.infoHash, req.peers)
 		if reqErr != nil {
+			if errors.Is(reqErr, errBanned) {
+				c.countHash(req.source, stageBanned, 1)
+			} else {
+				c.countHash(req.source, stageMetaInfoFail, 1)
+			}
+
 			return
 		}
+
+		c.countHash(req.source, stageMetaInfoOK, 1)
 		select {
 		case <-ctx.Done():
 		case c.persistTorrents.In() <- infoHashWithMetaInfo{
@@ -28,6 +39,7 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 
 func (c *crawler) doRequestMetaInfo(
 	ctx context.Context,
+	source string,
 	hash protocol.ID,
 	peers []netip.AddrPort,
 ) (metainforequester.Response, error) {
@@ -42,6 +54,7 @@ func (c *crawler) doRequestMetaInfo(
 
 	for _, p := range peers {
 		res, err := c.metainfoRequester.Request(ctx, hash, p)
+		c.dialsTotal.With(prometheus.Labels{"source": source, "result": classifyDialError(err)}).Inc()
 		if err != nil {
 			addErr(err)
 			continue
@@ -49,7 +62,7 @@ func (c *crawler) doRequestMetaInfo(
 
 		if banErr := c.banningChecker.Check(res.Info); banErr != nil {
 			_ = c.blockingManager.Block(ctx, []protocol.ID{hash}, false)
-			return metainforequester.Response{}, banErr
+			return metainforequester.Response{}, errors.Join(errBanned, banErr)
 		}
 
 		return res, nil

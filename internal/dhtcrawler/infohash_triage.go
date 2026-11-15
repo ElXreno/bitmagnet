@@ -56,6 +56,12 @@ func (c *crawler) runInfoHashTriage(ctx context.Context) {
 				valuers = append(valuers, h)
 			}
 
+			for h, r := range reqMap {
+				if _, ok := filteredHashMap[h]; !ok {
+					c.countHash(r.source, stageBlocked, 1)
+				}
+			}
+
 			var result []*triageResult
 			if queryErr := c.dao.Torrent.WithContext(ctx).Select(
 				c.dao.Torrent.InfoHash,
@@ -105,12 +111,16 @@ func (c *crawler) runInfoHashTriage(ctx context.Context) {
 					}
 				} else if r.source == sourceSample && ((!t.Seeders.Valid || !t.Leechers.Valid) ||
 					t.UpdatedAt.Before(time.Now().Add(-c.rescrapeThreshold))) {
+					c.countHash(r.source, stageScrape, 1)
+
 					select {
 					case <-ctx.Done():
 						return
 					case c.scrape.In() <- r:
 						continue
 					}
+				} else {
+					c.countHash(r.source, stageKnown, 1)
 				}
 			}
 		}

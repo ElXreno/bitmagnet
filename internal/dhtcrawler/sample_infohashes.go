@@ -52,6 +52,7 @@ func (c *crawler) runSampleInfoHashes(ctx context.Context) {
 		}
 
 		c.countHash(sourceSample, stageDiscovered, len(discoveredHashes))
+		c.countHash(sourceSample, stageDuplicate, len(res.Samples)-len(discoveredHashes))
 
 		for _, h := range discoveredHashes {
 			select {

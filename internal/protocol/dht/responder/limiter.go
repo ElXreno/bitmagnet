@@ -7,6 +7,7 @@ import (
 
 	"github.com/bitmagnet-io/bitmagnet/internal/concurrency"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/time/rate"
 )
 
@@ -48,5 +49,17 @@ func NewLimiter(
 }
 
 func (l *limiter) Allow(addr netip.Addr) bool {
-	return l.keyedLimiter.Allow(addr.String()) && l.limiter.Allow()
+	if !l.keyedLimiter.Allow(addr.String()) {
+		limiterRefusedTotal.With(prometheus.Labels{"scope": "ip"}).Inc()
+
+		return false
+	}
+
+	if !l.limiter.Allow() {
+		limiterRefusedTotal.With(prometheus.Labels{"scope": "overall"}).Inc()
+
+		return false
+	}
+
+	return true
 }

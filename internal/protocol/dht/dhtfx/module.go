@@ -2,7 +2,6 @@ package dhtfx
 
 import (
 	"github.com/bitmagnet-io/bitmagnet/internal/config/configfx"
-	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/responder"
@@ -17,7 +16,7 @@ func New() fx.Option {
 		fx.Provide(
 			fx.Annotated{
 				Name:   "dht_node_id",
-				Target: protocol.RandomNodeIDWithClientSuffix,
+				Target: persistentNodeID,
 			},
 			client.New,
 			ktable.New,

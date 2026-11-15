@@ -35,6 +35,7 @@ type crawler struct {
 	inboundHashes                <-chan responder.InboundHash
 	inboundSeen                  *ignoreFilter
 	hashesTotal                  *prometheus.CounterVec
+	dialsTotal                   *prometheus.CounterVec
 	nodesForPing                 concurrency.BufferedConcurrentChannel[ktable.Node]
 	nodesForFindNode             concurrency.BufferedConcurrentChannel[ktable.Node]
 	nodesForSampleInfoHashes     concurrency.BufferedConcurrentChannel[ktable.Node]
@@ -98,6 +99,17 @@ const (
 	stageDiscovered    = "discovered"
 	stageNeedsMetaInfo = "needs_metainfo"
 	stagePersisted     = "persisted"
+	stageDuplicate     = "duplicate"
+	stageBlocked       = "blocked"
+	stageKnown         = "known"
+	stageScrape        = "scrape"
+	stageGetPeersError = "get_peers_error"
+	stageNoPeers       = "no_peers"
+	stagePeersFound    = "peers_found"
+	stagePeersSum      = "peers_sum"
+	stageMetaInfoOK    = "metainfo_ok"
+	stageMetaInfoFail  = "metainfo_failed"
+	stageBanned        = "banned"
 )
 
 func (c *crawler) countHash(source string, stage string, n int) {

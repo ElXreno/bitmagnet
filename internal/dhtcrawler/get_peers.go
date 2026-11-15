@@ -10,12 +10,23 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
 )
 
+var errNoPeers = errors.New("no peers found")
+
 func (c *crawler) runGetPeers(ctx context.Context) {
 	_ = c.getPeers.Run(ctx, func(req nodeHasPeersForHash) {
 		pfh, pfhErr := c.requestPeersForHash(ctx, req)
 		if pfhErr != nil {
+			if errors.Is(pfhErr, errNoPeers) {
+				c.countHash(req.source, stageNoPeers, 1)
+			} else {
+				c.countHash(req.source, stageGetPeersError, 1)
+			}
+
 			return
 		}
+
+		c.countHash(req.source, stagePeersFound, 1)
+		c.countHash(req.source, stagePeersSum, len(pfh.peers))
 
 		peers := make([]netip.AddrPort, 0, len(pfh.peers))
 		hashPeers := make([]ktable.HashPeer, 0, len(pfh.peers))
@@ -79,7 +90,7 @@ func (c *crawler) requestPeersForHash(
 	}
 
 	if len(res.Values) < 1 {
-		return infoHashWithPeers{}, errors.New("no peers found")
+		return infoHashWithPeers{}, errNoPeers
 	}
 
 	return infoHashWithPeers{

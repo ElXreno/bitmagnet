@@ -45,6 +45,7 @@ type Result struct {
 
 	PersistedTotal prometheus.Collector `group:"prometheus_collectors"`
 	HashesTotal    prometheus.Collector `group:"prometheus_collectors"`
+	DialsTotal     prometheus.Collector `group:"prometheus_collectors"`
 }
 
 func New(params Params) Result {
@@ -64,6 +65,12 @@ func New(params Params) Result {
 		Name:      "hashes_total",
 		Help:      "A counter of info hashes by discovery source and pipeline stage.",
 	}, []string{"source", "stage"})
+	dialsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bitmagnet",
+		Subsystem: "dht_crawler",
+		Name:      "metainfo_dials_total",
+		Help:      "A counter of meta info requests to peers by discovery source and result.",
+	}, []string{"source", "result"})
 
 	return Result{
 		Worker: worker.NewWorker(
@@ -99,6 +106,7 @@ func New(params Params) Result {
 							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
 						},
 						hashesTotal: hashesTotal,
+						dialsTotal:  dialsTotal,
 						nodesForPing: concurrency.NewBufferedConcurrentChannel[ktable.Node](
 							scalingFactor, scalingFactor),
 						nodesForFindNode: concurrency.NewBufferedConcurrentChannel[ktable.Node](
@@ -161,6 +169,7 @@ func New(params Params) Result {
 		),
 		PersistedTotal:   persistedTotal,
 		HashesTotal:      hashesTotal,
+		DialsTotal:       dialsTotal,
 		DhtCrawlerActive: active,
 	}
 }

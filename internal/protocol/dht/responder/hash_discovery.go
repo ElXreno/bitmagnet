@@ -6,6 +6,7 @@ import (
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type InboundHash struct {
@@ -34,7 +35,9 @@ func (r responderHashDiscovery) Respond(ctx context.Context, msg dht.RecvMsg) (d
 		if h.Peer.IsValid() && h.Peer.Port() != 0 {
 			select {
 			case r.inboundHashes <- h:
+				inboundHashTotal.With(prometheus.Labels{labelQuery: h.Query, "result": "queued"}).Inc()
 			default:
+				inboundHashTotal.With(prometheus.Labels{labelQuery: h.Query, "result": "dropped"}).Inc()
 			}
 		}
 	}

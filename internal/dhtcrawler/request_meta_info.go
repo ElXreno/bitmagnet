@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"os"
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
@@ -43,6 +44,8 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 }
 
 const metaInfoParallelDials = 4
+
+var dialEveryPeer = os.Getenv("BITMAGNET_DIAL_EVERY_PEER") == "1"
 
 func (c *crawler) doRequestMetaInfo(
 	ctx context.Context,
@@ -92,7 +95,7 @@ func (c *crawler) doRequestMetaInfo(
 		cand := <-probed
 
 		switch {
-		case cand.ping == "ok":
+		case cand.ping == "ok" || dialEveryPeer:
 			candidates = append(candidates, cand)
 		case cand.prev == "dead":
 			c.probeTotal.With(prometheus.Labels{"prev": cand.prev, "ping": cand.ping, "dial": "skipped_dead"}).Inc()

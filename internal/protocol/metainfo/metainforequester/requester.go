@@ -10,9 +10,11 @@ import (
 	"math"
 	"net"
 	"net/netip"
+	"syscall"
 	"time"
 
 	"github.com/anacrolix/torrent/bencode"
+	"github.com/anacrolix/torrent/mse"
 	"github.com/anacrolix/torrent/peer_protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
@@ -80,10 +82,34 @@ type HandshakeInfo struct {
 
 type Response struct {
 	HandshakeInfo
-	Info metainfo.Info
+	Info      metainfo.Info
+	Encrypted bool
 }
 
+var errPlainHandshakeClosed = errors.New("peer closed the connection during the plaintext handshake")
+
 func (r requester) Request(ctx context.Context, infoHash protocol.ID, addr netip.AddrPort) (Response, error) {
+	res, err := r.request(ctx, infoHash, addr, false)
+	if err == nil || !errors.Is(err, errPlainHandshakeClosed) {
+		return res, err
+	}
+
+	res, mseErr := r.request(ctx, infoHash, addr, true)
+	if mseErr != nil {
+		return Response{}, fmt.Errorf("mse retry: %w", mseErr)
+	}
+
+	res.Encrypted = true
+
+	return res, nil
+}
+
+func (r requester) request(
+	ctx context.Context,
+	infoHash protocol.ID,
+	addr netip.AddrPort,
+	encrypted bool,
+) (Response, error) {
 	timeoutCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
@@ -96,21 +122,37 @@ func (r requester) Request(ctx context.Context, infoHash protocol.ID, addr netip
 		_ = conn.Close()
 	}()
 
-	hsInfo, btHandshakeErr := btHandshake(conn, infoHash, r.clientID)
+	var rw io.ReadWriter = conn
+
+	if encrypted {
+		encRw, _, mseErr := mse.InitiateHandshake(conn, infoHash[:], nil, mse.AllSupportedCrypto)
+		if mseErr != nil {
+			return Response{}, fmt.Errorf("mse handshake: %w", mseErr)
+		}
+
+		rw = encRw
+	}
+
+	hsInfo, btHandshakeErr := btHandshake(rw, infoHash, r.clientID)
 	if btHandshakeErr != nil {
+		if !encrypted && (errors.Is(btHandshakeErr, io.EOF) || errors.Is(btHandshakeErr, io.ErrUnexpectedEOF) ||
+			errors.Is(btHandshakeErr, syscall.ECONNRESET)) {
+			return Response{}, errors.Join(errPlainHandshakeClosed, btHandshakeErr)
+		}
+
 		return Response{}, btHandshakeErr
 	}
 
-	metadataSize, utMetadata, exHandshakeErr := exHandshake(conn)
+	metadataSize, utMetadata, exHandshakeErr := exHandshake(rw)
 	if exHandshakeErr != nil {
 		return Response{}, exHandshakeErr
 	}
 
-	if requestAllPiecesErr := requestAllPieces(conn, metadataSize, utMetadata); requestAllPiecesErr != nil {
+	if requestAllPiecesErr := requestAllPieces(rw, metadataSize, utMetadata); requestAllPiecesErr != nil {
 		return Response{}, requestAllPiecesErr
 	}
 
-	pieces, readAllPiecesErr := readAllPieces(conn, metadataSize)
+	pieces, readAllPiecesErr := readAllPieces(rw, metadataSize)
 	if readAllPiecesErr != nil {
 		return Response{}, readAllPiecesErr
 	}

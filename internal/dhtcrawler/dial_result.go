@@ -31,6 +31,15 @@ func classifyDialError(err error) string {
 
 	msg := err.Error()
 
+	if strings.HasPrefix(msg, "mse retry: ") {
+		inner := errors.Unwrap(err)
+		if strings.HasPrefix(inner.Error(), "mse handshake: ") {
+			return "mse_handshake_" + classifyReadError(inner)
+		}
+
+		return "mse_" + classifyDialError(inner)
+	}
+
 	switch {
 	case strings.Contains(msg, "failed to read all handshake bytes"):
 		return "bt_handshake_" + classifyReadError(err)

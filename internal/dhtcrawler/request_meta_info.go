@@ -54,7 +54,12 @@ func (c *crawler) doRequestMetaInfo(
 
 	for _, p := range peers {
 		res, err := c.metainfoRequester.Request(ctx, hash, p)
-		c.dialsTotal.With(prometheus.Labels{"source": source, "result": classifyDialError(err)}).Inc()
+		result := classifyDialError(err)
+		if err == nil && res.Encrypted {
+			result = "ok_mse"
+		}
+
+		c.dialsTotal.With(prometheus.Labels{"source": source, "result": result}).Inc()
 		if err != nil {
 			addErr(err)
 			continue

@@ -281,6 +281,20 @@ func (c *crawler) doRequestMetaInfo(
 
 	closedPeers := 0
 	clients := make(map[string]struct{})
+	probedClients := make(map[string]struct{})
+	decided, probe := false, false
+
+	probing := func(l *clientLearner) bool {
+		if !decided {
+			decided, probe = true, l.shouldProbe()
+
+			if probe {
+				c.countHash(source, "closed_client_probe", 1)
+			}
+		}
+
+		return probe
+	}
 
 	for {
 		for inflight < metaInfoParallelDials && next < len(candidates) {
@@ -349,7 +363,16 @@ func (c *crawler) doRequestMetaInfo(
 				clients[key] = struct{}{}
 
 				if learnedClosed = c.closedClients.isClosed(key); learnedClosed {
-					c.countHash(source, "closed_client_learned", 1)
+					switch {
+					case errors.Is(r.err, metainforequester.ErrClosedNetworkPeer):
+					case probing(c.closedClients):
+						probedClients[key] = struct{}{}
+						learnedClosed = false
+					}
+
+					if learnedClosed {
+						c.countHash(source, "closed_client_learned", 1)
+					}
 				}
 			}
 
@@ -377,13 +400,21 @@ func (c *crawler) doRequestMetaInfo(
 			c.countHash(source, stageMetaInfoOK+"6", 1)
 		}
 
-		clients[clientid.PeerKey([20]byte(r.res.PeerID))] = struct{}{}
+		fetchedBy := clientid.PeerKey([20]byte(r.res.PeerID))
+		clients[fetchedBy] = struct{}{}
 		c.closedClients.observe(clients, true)
+
+		if !c.closedClients.isClosed(fetchedBy) || !probing(c.closedClients) {
+			fetchedBy = ""
+		}
+
+		c.judgeProbes(source, probedClients, closedPeers, fetchedBy)
 
 		return r.res, nil
 	}
 
 	c.closedClients.observe(clients, false)
+	c.judgeProbes(source, probedClients, closedPeers, "")
 
 	if len(errs) == 0 {
 		countSwarm("no_candidates")
@@ -400,6 +431,23 @@ func (c *crawler) doRequestMetaInfo(
 	countSwarm(stageMetaInfoFail)
 
 	return metainforequester.Response{}, errors.Join(errs...)
+}
+
+func (c *crawler) judgeProbes(source string, probed map[string]struct{}, closedPeers int, fetchedBy string) {
+	forgiven := 0
+
+	if fetchedBy != "" {
+		delete(probed, fetchedBy)
+		c.countHash(source, "closed_client_probe_fetched", 1)
+
+		forgiven += c.closedClients.observeProbe(map[string]struct{}{fetchedBy: {}}, true)
+	}
+
+	if closedPeers == 0 {
+		forgiven += c.closedClients.observeProbe(probed, false)
+	}
+
+	c.countHash(source, "closed_client_forgiven", forgiven)
 }
 
 const peerProbeTimeout = 800 * time.Millisecond

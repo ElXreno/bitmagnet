@@ -2,8 +2,10 @@ package dhtcrawler
 
 import (
 	"encoding/json"
+	"math/rand/v2"
 	"os"
 	"sort"
+	"strconv"
 	"sync"
 )
 
@@ -11,13 +13,17 @@ const (
 	clientLearnerFile    = "closed_clients.json"
 	clientLearnerMaxKeys = 4000
 	// a closed client may fetch this share of its swarms before it is no longer one
-	clientLearnerForgive = 0.01
+	clientLearnerForgive  = 0.01
+	clientLearnerProbeMin = 100
 )
 
 type clientStat struct {
 	Swarms  int  `json:"swarms"`
 	Fetched int  `json:"fetched"`
 	Closed  bool `json:"closed"`
+
+	Probed       int `json:"probed,omitempty"`
+	ProbeFetched int `json:"probe_fetched,omitempty"`
 }
 
 // clientLearner finds closed networks by what they do: a client whose swarms never give meta info to
@@ -29,10 +35,23 @@ type clientLearner struct {
 	maxShare  float64
 	stats     map[string]*clientStat
 	onChange  func(key string, stat clientStat)
+	probe     func() bool
+}
+
+func probePercent() int {
+	if v, err := strconv.Atoi(os.Getenv("BITMAGNET_CLOSED_LEARN_PROBE_PERCENT")); err == nil && v >= 0 {
+		return min(v, 100)
+	}
+
+	return 2
 }
 
 func newClientLearner(path string, minSwarms int, maxShare float64) *clientLearner {
-	l := &clientLearner{path: path, minSwarms: minSwarms, maxShare: maxShare, stats: make(map[string]*clientStat)}
+	percent := probePercent()
+	l := &clientLearner{
+		path: path, minSwarms: minSwarms, maxShare: maxShare, stats: make(map[string]*clientStat),
+		probe: func() bool { return rand.IntN(100) < percent },
+	}
 
 	if data, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(data, &l.stats)
@@ -60,6 +79,10 @@ func (l *clientLearner) isClosed(key string) bool {
 	return stat != nil && stat.Closed
 }
 
+func (l *clientLearner) shouldProbe() bool {
+	return l != nil && l.probe != nil && l.probe()
+}
+
 // observe records one swarm in which peers of these clients completed a handshake.
 func (l *clientLearner) observe(keys map[string]struct{}, fetched bool) {
 	if l == nil || len(keys) == 0 {
@@ -71,6 +94,10 @@ func (l *clientLearner) observe(keys map[string]struct{}, fetched bool) {
 
 	for key := range keys {
 		stat := l.stats[key]
+		if stat != nil && stat.Closed {
+			continue
+		}
+
 		if stat == nil {
 			if len(l.stats) >= clientLearnerMaxKeys {
 				l.dropRarest()
@@ -86,24 +113,53 @@ func (l *clientLearner) observe(keys map[string]struct{}, fetched bool) {
 			stat.Fetched++
 		}
 
-		share := float64(stat.Fetched) / float64(stat.Swarms)
-		closed := stat.Closed
-
-		switch {
-		case !stat.Closed && stat.Swarms >= l.minSwarms && share <= l.maxShare:
-			closed = true
-		case stat.Closed && share > clientLearnerForgive:
-			closed = false
-		}
-
-		if closed != stat.Closed {
-			stat.Closed = closed
+		if stat.Swarms >= l.minSwarms && float64(stat.Fetched)/float64(stat.Swarms) <= l.maxShare {
+			stat.Closed = true
 
 			if l.onChange != nil {
 				l.onChange(key, *stat)
 			}
 		}
 	}
+}
+
+func (l *clientLearner) observeProbe(keys map[string]struct{}, fetched bool) int {
+	if l == nil || len(keys) == 0 {
+		return 0
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	forgiven := 0
+
+	for key := range keys {
+		stat := l.stats[key]
+		if stat == nil || !stat.Closed {
+			continue
+		}
+
+		stat.Probed++
+
+		if fetched {
+			stat.ProbeFetched++
+		}
+
+		if stat.Probed < clientLearnerProbeMin || float64(stat.ProbeFetched)/float64(stat.Probed) <= clientLearnerForgive {
+			continue
+		}
+
+		stat.Closed = false
+		forgiven++
+
+		if l.onChange != nil {
+			l.onChange(key, *stat)
+		}
+
+		delete(l.stats, key)
+	}
+
+	return forgiven
 }
 
 func (l *clientLearner) dropRarest() {

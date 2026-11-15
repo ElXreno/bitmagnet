@@ -63,6 +63,20 @@ func (l clientLogger) SampleInfoHashes(
 	return res, err
 }
 
+func (l clientLogger) AnnouncePeer(
+	ctx context.Context,
+	addr netip.AddrPort,
+	infoHash dht.ID,
+	port uint16,
+	token string,
+) error {
+	start := time.Now()
+	err := l.client.AnnouncePeer(ctx, addr, infoHash, port, token)
+	l.log(dht.QAnnouncePeer, addr, start, err)
+
+	return err
+}
+
 func (l clientLogger) IPv6() bool {
 	return l.client.IPv6()
 }

@@ -14,17 +14,19 @@ import (
 
 type fakeServer struct {
 	server.Server
-	ipv6 bool
-	ret  dht.Return
-	args []dht.MsgArgs
+	ipv6    bool
+	ret     dht.Return
+	args    []dht.MsgArgs
+	queries []string
 }
 
 func (f *fakeServer) IPv6() bool {
 	return f.ipv6
 }
 
-func (f *fakeServer) Query(_ context.Context, addr netip.AddrPort, _ string, args dht.MsgArgs) (dht.RecvMsg, error) {
+func (f *fakeServer) Query(_ context.Context, addr netip.AddrPort, q string, args dht.MsgArgs) (dht.RecvMsg, error) {
 	f.args = append(f.args, args)
+	f.queries = append(f.queries, q)
 	ret := f.ret
 
 	return dht.RecvMsg{Msg: dht.Msg{Y: dht.YResponse, R: &ret}, From: addr}, nil
@@ -112,6 +114,38 @@ func TestWithIPv6WantIsSentAndNodes6AreUsed(t *testing.T) {
 	for _, args := range s.args[1:] {
 		assert.Equal(t, []dht.Want{dht.WantNodes, dht.WantNodes6}, args.Want)
 	}
+}
+
+func TestAnnouncePeerSendsTheGetPeersToken(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	addr := netip.MustParseAddrPort("192.0.2.1:6881")
+	s := newFakeServer(false)
+	a := serverAdapter{nodeID: protocol.ID{1}, server: s}
+
+	got, err := a.GetPeers(ctx, addr, protocol.ID{7})
+	require.NoError(t, err)
+	assert.Empty(t, got.Token)
+
+	token := "opaque\x00token"
+	s.ret.Token = &token
+
+	got, err = a.GetPeers(ctx, addr, protocol.ID{7})
+	require.NoError(t, err)
+	assert.Equal(t, token, got.Token)
+
+	require.NoError(t, a.AnnouncePeer(ctx, addr, protocol.ID{7}, 3334, got.Token))
+
+	sent := s.args[len(s.args)-1]
+
+	assert.Equal(t, dht.QAnnouncePeer, s.queries[len(s.queries)-1])
+	assert.Equal(t, protocol.ID{1}, sent.ID)
+	assert.Equal(t, protocol.ID{7}, sent.InfoHash)
+	assert.Equal(t, token, sent.Token)
+	assert.False(t, sent.ImpliedPort)
+	require.NotNil(t, sent.Port)
+	assert.Equal(t, 3334, *sent.Port)
 }
 
 func TestWithoutIPv6NoWantAndNodes6AreIgnored(t *testing.T) {

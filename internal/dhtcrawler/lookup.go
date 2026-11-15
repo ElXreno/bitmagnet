@@ -100,6 +100,23 @@ func (c *crawler) lookupFamilyPeers(
 	hash protocol.ID,
 	seeds []client.NodeInfo,
 ) []netip.AddrPort {
+	return c.lookupFamily(ctx, f, source, hash, seeds, nil)
+}
+
+type lookupToken struct {
+	addr     netip.AddrPort
+	distance protocol.ID
+	token    string
+}
+
+func (c *crawler) lookupFamily(
+	ctx context.Context,
+	f *nodeFamily,
+	source string,
+	hash protocol.ID,
+	seeds []client.NodeInfo,
+	tokens *[]lookupToken,
+) []netip.AddrPort {
 	candidates := make(map[netip.AddrPort]*lookupNode)
 	add := func(id protocol.ID, addr netip.AddrPort) {
 		if !addr.IsValid() || addr.Port() == 0 || c.family(addr.Addr()) != f {
@@ -198,6 +215,14 @@ func (c *crawler) lookupFamilyPeers(
 		if r.ok {
 			responded = append(responded, r.node.distance)
 			f.nodePool.add(r.res.ID, r.node.addr)
+
+			if tokens != nil && r.res.Token != "" {
+				*tokens = append(*tokens, lookupToken{
+					addr:     r.node.addr,
+					distance: r.node.distance,
+					token:    r.res.Token,
+				})
+			}
 
 			for _, v := range r.res.Values {
 				if len(peers) < lookupMaxPeers {

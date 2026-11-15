@@ -37,6 +37,7 @@ type inboundConfig struct {
 	maxHashes int
 	hold      time.Duration
 	maxConns  int
+	dht       bool
 }
 
 func inboundConfigFromEnv() (inboundConfig, bool) {
@@ -48,6 +49,7 @@ func inboundConfigFromEnv() (inboundConfig, bool) {
 		maxHashes: envInt("BITMAGNET_INBOUND_MAX_HASHES", 2000),
 		hold:      time.Duration(envInt("BITMAGNET_INBOUND_HOLD_SECONDS", 300)) * time.Second,
 		maxConns:  envInt("BITMAGNET_INBOUND_MAX_CONNS", 500),
+		dht:       os.Getenv("BITMAGNET_INBOUND_DHT") == "on",
 	}, true
 }
 
@@ -61,15 +63,17 @@ type inboundEntry struct {
 }
 
 type inboundPeers struct {
-	c         *crawler
-	config    inboundConfig
-	receiver  metainforequester.Receiver
-	listeners []net.Listener
-	trackers  []*trackerScraper
-	slots     chan struct{}
-	now       func() time.Time
-	mu        sync.Mutex
-	entries   map[protocol.ID]*inboundEntry
+	c          *crawler
+	config     inboundConfig
+	receiver   metainforequester.Receiver
+	listeners  []net.Listener
+	trackers   []*trackerScraper
+	dhtQueue   chan protocol.ID
+	dhtTargets []inboundDHTTarget
+	slots      chan struct{}
+	now        func() time.Time
+	mu         sync.Mutex
+	entries    map[protocol.ID]*inboundEntry
 }
 
 func listenInbound(port uint16, logger *zap.SugaredLogger) (v4 net.Listener, v6 net.Listener) {
@@ -145,6 +149,10 @@ func (c *crawler) openInboundPeers(config inboundConfig, receiver metainforeques
 		scraper.onHeld = p.announced
 	}
 
+	if config.dht {
+		p.enableDHT(v4, v6)
+	}
+
 	c.inbound = p
 }
 
@@ -155,6 +163,12 @@ func (p *inboundPeers) run(ctx context.Context) {
 
 	for _, listener := range p.listeners {
 		go p.serve(ctx, listener)
+	}
+
+	if p.dhtQueue != nil {
+		for range inboundDHTWorkers {
+			go p.runDHT(ctx)
+		}
 	}
 
 	ticker := time.NewTicker(time.Second)
@@ -355,6 +369,7 @@ func (p *inboundPeers) register(req nodeHasPeersForHash) {
 
 	p.c.countHash(sourceInboundPeer, stageInboundRegistered, 1)
 	p.c.countHash(sourceInboundPeer, stageInboundRegistered+trackerSource(seeders), 1)
+	p.queueDHT(req.infoHash)
 }
 
 func (p *inboundPeers) add(req nodeHasPeersForHash, seeders uint32) string {

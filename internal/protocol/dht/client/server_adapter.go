@@ -63,11 +63,36 @@ func (a serverAdapter) GetPeers(
 		return GetPeersResult{}, err
 	}
 
-	return GetPeersResult{
+	result := GetPeersResult{
 		ID:     res.Msg.R.ID,
 		Values: extractValues(res.Msg),
 		Nodes:  a.extractNodes(res.Msg),
-	}, nil
+	}
+
+	if res.Msg.R.Token != nil {
+		result.Token = *res.Msg.R.Token
+	}
+
+	return result, nil
+}
+
+func (a serverAdapter) AnnouncePeer(
+	ctx context.Context,
+	addr netip.AddrPort,
+	infoHash protocol.ID,
+	port uint16,
+	token string,
+) error {
+	torrentPort := int(port)
+
+	_, err := a.server.Query(ctx, addr, dht.QAnnouncePeer, dht.MsgArgs{
+		ID:       a.nodeID,
+		InfoHash: infoHash,
+		Port:     &torrentPort,
+		Token:    token,
+	})
+
+	return err
 }
 
 func (a serverAdapter) GetPeersScrape(

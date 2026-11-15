@@ -19,6 +19,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/blocking"
 	"github.com/bitmagnet-io/bitmagnet/internal/concurrency"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester/peertest"
@@ -97,8 +98,13 @@ type inboundTest struct {
 func newInboundTest(t *testing.T, config inboundConfig, scraper *trackerScraper) inboundTest {
 	t.Helper()
 
+	return startInboundTest(t, newTestCrawler(nil, nil), config, scraper)
+}
+
+func startInboundTest(t *testing.T, c *crawler, config inboundConfig, scraper *trackerScraper) inboundTest {
+	t.Helper()
+
 	blocks := &blockRecorder{}
-	c := newTestCrawler(nil, nil)
 	c.logger = zap.NewNop().Sugar()
 	c.fetched = &ignoreFilter{bloom: boom.NewStableBloomFilter(1000, 2, 0.001)}
 	c.persistTorrents = concurrency.NewBatchingChannel[infoHashWithMetaInfo](10, 1, 10*time.Millisecond)
@@ -670,6 +676,137 @@ func TestInboundBannedAndPanickingChecks(t *testing.T) {
 	}
 }
 
+type dhtAnnounce struct {
+	addr  netip.AddrPort
+	hash  protocol.ID
+	port  uint16
+	token string
+}
+
+type announcingClient struct {
+	client.Client
+	mu        sync.Mutex
+	nodes     map[netip.AddrPort]protocol.ID
+	refusing  netip.AddrPort
+	announces []dhtAnnounce
+}
+
+func (a *announcingClient) GetPeers(
+	_ context.Context, addr netip.AddrPort, _ protocol.ID,
+) (client.GetPeersResult, error) {
+	id, ok := a.nodes[addr]
+	if !ok {
+		return client.GetPeersResult{}, errors.New("no reply")
+	}
+
+	return client.GetPeersResult{ID: id, Token: "token of " + addr.String()}, nil
+}
+
+func (a *announcingClient) AnnouncePeer(
+	_ context.Context, addr netip.AddrPort, hash protocol.ID, port uint16, token string,
+) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.announces = append(a.announces, dhtAnnounce{addr: addr, hash: hash, port: port, token: token})
+
+	if addr == a.refusing {
+		return errors.New("bad token")
+	}
+
+	return nil
+}
+
+func (a *announcingClient) seen() []dhtAnnounce {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return append([]dhtAnnounce(nil), a.announces...)
+}
+
+func TestInboundDHTAnnounce(t *testing.T) {
+	t.Parallel()
+
+	hash := protocol.ID{0x80}
+	config := inboundConfig{maxHashes: 10, hold: time.Minute, maxConns: 4}
+
+	newClient := func() *announcingClient {
+		return &announcingClient{
+			nodes:    make(map[netip.AddrPort]protocol.ID),
+			refusing: netip.MustParseAddrPort("192.0.2.3:6881"),
+		}
+	}
+
+	start := func(cl *announcingClient, config inboundConfig) inboundTest {
+		c := newFamilyTestCrawler(false, cl)
+
+		for n := 1; n <= 10; n++ {
+			addr := netip.AddrPortFrom(netip.AddrFrom4([4]byte{192, 0, 2, byte(n)}), 6881)
+			cl.nodes[addr] = protocol.ID{0x80 + byte(n)}
+			c.v4.nodePool.add(cl.nodes[addr], addr)
+		}
+
+		c.v4.nodePool.rebuild()
+
+		return startInboundTest(t, c, config, offlineScraper(1))
+	}
+
+	off := newClient()
+	i := start(off, config)
+
+	i.inbound.register(i.seed(hash, 7, 1))
+
+	if i.inbound.dhtQueue != nil || len(i.registered()) != 1 {
+		t.Fatal("without the switch nothing may be queued for the DHT")
+	}
+
+	config.dht = true
+	on := newClient()
+	i = start(on, config)
+
+	i.inbound.register(i.seed(hash, 7, 1))
+
+	eventually(t, "the DHT announce", func() bool {
+		return hashCount(t, i.crawler, sourceInboundPeer, "dht_announced") == 1
+	})
+
+	announces := on.seen()
+	if len(announces) != inboundDHTNodes {
+		t.Fatalf("want an announce to the %d closest nodes, got %d", inboundDHTNodes, len(announces))
+	}
+
+	port := listenerPort(i.inbound.listeners[0])
+
+	for _, announce := range announces {
+		id, known := on.nodes[announce.addr]
+		if !known || id[0] > 0x88 {
+			t.Errorf("announce to %s, which is not among the closest nodes", announce.addr)
+		}
+
+		if announce.hash != hash || announce.port != port || announce.token != "token of "+announce.addr.String() {
+			t.Errorf("announce %+v, want the listener port %d and the token of that node", announce, port)
+		}
+	}
+
+	if got := hashCount(t, i.crawler, sourceInboundPeer, "dht_announce_nodes"); got != inboundDHTNodes-1 {
+		t.Fatalf("want %d nodes to accept, got %v", inboundDHTNodes-1, got)
+	}
+
+	if len(off.seen()) != 0 {
+		t.Fatalf("the DHT announce is off, yet %d announces were sent", len(off.seen()))
+	}
+
+	silent := newClient()
+	i = start(silent, config)
+	silent.nodes = map[netip.AddrPort]protocol.ID{}
+
+	i.inbound.register(i.seed(hash, 7, 1))
+
+	eventually(t, "the failed DHT announce", func() bool {
+		return hashCount(t, i.crawler, sourceInboundPeer, "dht_announce_failed") == 1
+	})
+}
+
 type heldAnnounce struct {
 	event uint32
 	hash  protocol.ID
@@ -824,6 +961,7 @@ func TestInboundSwitchAndTrackerHold(t *testing.T) {
 	t.Setenv("BITMAGNET_INBOUND_MAX_HASHES", "7")
 	t.Setenv("BITMAGNET_INBOUND_HOLD_SECONDS", "1")
 	t.Setenv("BITMAGNET_INBOUND_MAX_CONNS", "3")
+	t.Setenv("BITMAGNET_INBOUND_DHT", "")
 
 	c, _ := newCrawler()
 	if c.inbound == nil {

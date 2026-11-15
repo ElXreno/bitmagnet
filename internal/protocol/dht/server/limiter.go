@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"time"
 
 	"context"
@@ -49,7 +50,7 @@ func (s queryLimiter) Query(
 	if limitErr != nil {
 		limiterWaitErrors.With(labels).Inc()
 
-		return r, limitErr
+		return r, errors.Join(ErrLimited, limitErr)
 	}
 
 	return s.server.Query(ctx, addr, q, args)
@@ -83,3 +84,6 @@ type maxLimiterWaitKey struct{}
 func WithMaxLimiterWait(ctx context.Context, d time.Duration) context.Context {
 	return context.WithValue(ctx, maxLimiterWaitKey{}, d)
 }
+
+// ErrLimited marks a query that was never sent because the per-address limiter refused it.
+var ErrLimited = errors.New("per-address query limit reached")

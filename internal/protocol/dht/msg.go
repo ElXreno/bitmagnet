@@ -147,7 +147,14 @@ func (CompactIPv6NodeInfo) ElemSize() int {
 }
 
 func (me CompactIPv6NodeInfo) MarshalBinary() ([]byte, error) {
-	return marshalBinarySlice(me)
+	nodes := make(CompactIPv6NodeInfo, 0, len(me))
+
+	for _, ni := range me {
+		ni.Addr.IP = ni.Addr.IP.To16()
+		nodes = append(nodes, ni)
+	}
+
+	return marshalBinarySlice(nodes)
 }
 
 func (me CompactIPv6NodeInfo) MarshalBencode() ([]byte, error) {

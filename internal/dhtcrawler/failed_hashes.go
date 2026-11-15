@@ -1,7 +1,9 @@
 package dhtcrawler
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -24,6 +26,7 @@ const (
 // filter per hour and forgets an hour as a whole.
 type failedHashes struct {
 	mu          sync.Mutex
+	saving      sync.Mutex
 	dir         string
 	span        time.Duration
 	perSpan     uint
@@ -145,8 +148,18 @@ func (f *failedHashes) save() error {
 		return nil
 	}
 
+	f.saving.Lock()
+	defer f.saving.Unlock()
+
+	type snapshot struct {
+		generation int64
+		path       string
+		data       bytes.Buffer
+	}
+
+	var snapshots []*snapshot
+
 	f.mu.Lock()
-	defer f.mu.Unlock()
 
 	oldest := f.generation() - f.keep
 
@@ -166,29 +179,38 @@ func (f *failedHashes) save() error {
 			continue
 		}
 
-		file, err := os.CreateTemp(f.dir, "tmp-*")
-		if err != nil {
-			return err
-		}
+		taken := &snapshot{generation: generation, path: path}
+		if _, err := f.generations[generation].WriteTo(&taken.data); err != nil {
+			f.mu.Unlock()
 
-		_, writeErr := f.generations[generation].WriteTo(file)
-		closeErr := file.Close()
-
-		if writeErr != nil || closeErr != nil {
-			_ = os.Remove(file.Name())
-
-			if writeErr != nil {
-				return writeErr
-			}
-
-			return closeErr
-		}
-
-		if err := os.Rename(file.Name(), path); err != nil {
 			return err
 		}
 
 		delete(f.dirty, generation)
+
+		snapshots = append(snapshots, taken)
+	}
+
+	f.mu.Unlock()
+
+	for n, taken := range snapshots {
+		if err := writeFileAtomic(taken.path, func(w io.Writer) error {
+			_, err := taken.data.WriteTo(w)
+
+			return err
+		}); err != nil {
+			f.mu.Lock()
+
+			for _, unsaved := range snapshots[n:] {
+				if _, ok := f.generations[unsaved.generation]; ok {
+					f.dirty[unsaved.generation] = true
+				}
+			}
+
+			f.mu.Unlock()
+
+			return err
+		}
 	}
 
 	return nil

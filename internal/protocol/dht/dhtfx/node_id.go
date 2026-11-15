@@ -2,6 +2,7 @@ package dhtfx
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
@@ -40,5 +41,31 @@ func loadNodeID(path string) (id protocol.ID, stored bool) {
 }
 
 func saveNodeID(path string, id protocol.ID) {
-	_ = os.WriteFile(path, []byte(id.String()+"\n"), 0o600)
+	_ = writeFileAtomic(path, []byte(id.String()+"\n"))
+}
+
+func writeFileAtomic(path string, data []byte) error {
+	file, err := os.CreateTemp(filepath.Dir(path), "tmp-*")
+	if err != nil {
+		return err
+	}
+
+	_, err = file.Write(data)
+	if err == nil {
+		err = file.Sync()
+	}
+
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+
+	if err == nil {
+		err = os.Rename(file.Name(), path)
+	}
+
+	if err != nil {
+		_ = os.Remove(file.Name())
+	}
+
+	return err
 }

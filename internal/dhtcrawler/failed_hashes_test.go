@@ -1,7 +1,10 @@
 package dhtcrawler
 
 import (
+	"errors"
+	"io"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -82,5 +85,48 @@ func TestFailedHashesDisabled(t *testing.T) {
 
 	if f.test(protocol.ID{1}) || f.save() != nil {
 		t.Fatal("a disabled memory must be inert")
+	}
+}
+
+func TestWriteFileAtomicKeepsTheOldFileOnFailure(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state")
+
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	failure := errors.New("disk full")
+
+	err := writeFileAtomic(path, func(w io.Writer) error {
+		_, _ = w.Write([]byte("partial"))
+
+		return failure
+	})
+	if !errors.Is(err, failure) {
+		t.Fatalf("got %v", err)
+	}
+
+	if got, _ := os.ReadFile(path); string(got) != "old" {
+		t.Fatalf("a failed write replaced the file with %q", got)
+	}
+
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Fatalf("a failed write left %d files", len(entries))
+	}
+
+	err = writeFileAtomic(path, func(w io.Writer) error {
+		_, err := w.Write([]byte("new"))
+
+		return err
+	})
+	if got, _ := os.ReadFile(path); err != nil || string(got) != "new" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Fatalf("a write left %d files", len(entries))
 	}
 }

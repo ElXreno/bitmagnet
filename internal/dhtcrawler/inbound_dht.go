@@ -3,8 +3,8 @@ package dhtcrawler
 import (
 	"bytes"
 	"context"
+	"io"
 	"net"
-	"os"
 	"path/filepath"
 	"sort"
 
@@ -295,15 +295,9 @@ func (p *inboundPeers) saveDHT(data []byte) {
 		return
 	}
 
-	file, err := os.CreateTemp(filepath.Dir(p.config.stateFile), "tmp-*")
-	if err != nil {
-		return
-	}
+	_ = writeFileAtomic(p.dhtFile(), func(w io.Writer) error {
+		_, err := w.Write(data)
 
-	_, writeErr := file.Write(data)
-	closeErr := file.Close()
-
-	if writeErr != nil || closeErr != nil || os.Rename(file.Name(), p.dhtFile()) != nil {
-		_ = os.Remove(file.Name())
-	}
+		return err
+	})
 }

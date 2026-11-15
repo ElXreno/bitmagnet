@@ -3,6 +3,7 @@ package dhtcrawler
 import (
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -56,19 +57,40 @@ func (p *inboundPeers) saveState(saved []savedHash) {
 		return
 	}
 
-	file, err := os.CreateTemp(filepath.Dir(p.config.stateFile), "tmp-*")
-	if err != nil {
-		p.c.logger.Warnf("could not save the hashes that wait for incoming peers: %s", err.Error())
+	writeErr := writeFileAtomic(p.config.stateFile, func(w io.Writer) error {
+		_, err := w.Write(data)
 
-		return
+		return err
+	})
+	if writeErr != nil {
+		p.c.logger.Warnf("could not save the hashes that wait for incoming peers: %s", writeErr.Error())
+	}
+}
+
+func writeFileAtomic(path string, write func(io.Writer) error) error {
+	file, err := os.CreateTemp(filepath.Dir(path), "tmp-*")
+	if err != nil {
+		return err
 	}
 
-	_, writeErr := file.Write(data)
-	closeErr := file.Close()
+	err = write(file)
+	if err == nil {
+		err = file.Sync()
+	}
 
-	if writeErr != nil || closeErr != nil || os.Rename(file.Name(), p.config.stateFile) != nil {
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+
+	if err == nil {
+		err = os.Rename(file.Name(), path)
+	}
+
+	if err != nil {
 		_ = os.Remove(file.Name())
 	}
+
+	return err
 }
 
 func (p *inboundPeers) loadState() {

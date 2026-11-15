@@ -79,6 +79,7 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 
 		c.fetched.add(req.infoHash)
 		c.inbound.fetchedOutgoing(req.infoHash)
+		c.putHash(req.infoHash, req.peers)
 		c.countHash(req.source, stageMetaInfoOK, 1)
 		c.countClass(req.nodeHasPeersForHash, stageMetaInfoOK, 1)
 

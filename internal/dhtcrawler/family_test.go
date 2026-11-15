@@ -332,7 +332,7 @@ func hashPeers(table ktable.Table, hash protocol.ID) []netip.AddrPort {
 	return peers
 }
 
-func TestForwardPeersKeepsFamiliesApart(t *testing.T) {
+func TestFetchedHashesKeepFamiliesApart(t *testing.T) {
 	t.Parallel()
 
 	hash := protocol.ID{7}
@@ -340,6 +340,12 @@ func TestForwardPeersKeepsFamiliesApart(t *testing.T) {
 
 	on := newFamilyTestCrawler(true, nil)
 	on.forwardPeers(context.Background(), nodeHasPeersForHash{infoHash: hash, source: sourceSample}, peers)
+
+	if hashPeers(on.v4.kTable, hash) != nil || hashPeers(on.v6.kTable, hash) != nil {
+		t.Fatal("a hash whose peers were only found must not be offered to other nodes")
+	}
+
+	on.putHash(hash, peers)
 
 	if got := hashPeers(on.v4.kTable, hash); !sameAddrs(got, peer4) {
 		t.Fatalf("IPv4 table: %v", got)
@@ -349,14 +355,14 @@ func TestForwardPeersKeepsFamiliesApart(t *testing.T) {
 		t.Fatalf("IPv6 table: %v", got)
 	}
 
-	on.forwardPeers(context.Background(), nodeHasPeersForHash{infoHash: protocol.ID{8}}, peers[:1])
+	on.putHash(protocol.ID{8}, peers[:1])
 
 	if got := hashPeers(on.v6.kTable, protocol.ID{8}); got != nil {
 		t.Fatalf("a hash without IPv6 peers must stay out of the IPv6 table, got %v", got)
 	}
 
 	off := newFamilyTestCrawler(false, nil)
-	off.forwardPeers(context.Background(), nodeHasPeersForHash{infoHash: hash, source: sourceSample}, peers)
+	off.putHash(hash, peers)
 
 	if got := hashPeers(off.v4.kTable, hash); !sameAddrs(got, peer4, peer6) {
 		t.Fatalf("without IPv6 every peer stays in the one table, got %v", got)

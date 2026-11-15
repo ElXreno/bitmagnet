@@ -7,6 +7,7 @@ import (
 	"net/netip"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/concurrency"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
 )
@@ -100,7 +101,8 @@ func (c *crawler) runLookups(ctx context.Context, ch concurrency.BufferedConcurr
 	})
 }
 
-func (c *crawler) forwardPeers(ctx context.Context, req nodeHasPeersForHash, peers []netip.AddrPort) {
+// putHash makes a hash whose meta info was fetched known to the nodes that sample us or ask for its peers
+func (c *crawler) putHash(hash protocol.ID, peers []netip.AddrPort) {
 	hashPeers := make(map[*nodeFamily][]ktable.HashPeer, 2)
 
 	for _, p := range peers {
@@ -112,10 +114,12 @@ func (c *crawler) forwardPeers(ctx context.Context, req nodeHasPeersForHash, pee
 
 	for f, familyPeers := range hashPeers {
 		f.kTable.BatchCommand(
-			ktable.PutHash{ID: req.infoHash, Peers: familyPeers},
+			ktable.PutHash{ID: hash, Peers: familyPeers},
 		)
 	}
+}
 
+func (c *crawler) forwardPeers(ctx context.Context, req nodeHasPeersForHash, peers []netip.AddrPort) {
 	select {
 	case <-ctx.Done():
 	case c.requestMetaInfo.In() <- infoHashWithPeers{

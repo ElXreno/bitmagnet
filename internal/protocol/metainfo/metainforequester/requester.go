@@ -467,7 +467,7 @@ func uintToBigEndian4(i uint) []byte {
 }
 
 func readAllPieces(r io.Reader, metadataSize uint) ([]byte, error) {
-	metadataBytes := make([]byte, metadataSize)
+	var metadataBytes []byte
 
 	receivedSize := uint(0)
 	for receivedSize < metadataSize {
@@ -521,15 +521,27 @@ func readAllPieces(r io.Reader, metadataSize uint) ([]byte, error) {
 			}
 
 			start := uint(piece) * metadataPieceSize
-			if start+uint(len(metadataPiece)) > metadataSize {
+
+			end := start + uint(len(metadataPiece))
+			if end > metadataSize {
 				return nil, errors.New("piece exceeds the metadata size")
 			}
 
+			metadataBytes = grownTo(metadataBytes, end)
 			copy(metadataBytes[start:], metadataPiece)
 		}
 	}
 
-	return metadataBytes, nil
+	return grownTo(metadataBytes, metadataSize), nil
+}
+
+// grownTo zero-extends b to at least size bytes, so a meta info takes memory as its pieces arrive.
+func grownTo(b []byte, size uint) []byte {
+	if uint(len(b)) >= size {
+		return b
+	}
+
+	return append(b, make([]byte, size-uint(len(b)))...)
 }
 
 func readExMessage(r io.Reader) ([]byte, error) {

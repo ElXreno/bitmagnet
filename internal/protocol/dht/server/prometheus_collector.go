@@ -84,22 +84,21 @@ func (s prometheusServerWrapper) Query(
 	q string,
 	args dht.MsgArgs,
 ) (dht.RecvMsg, error) {
-	labels := prometheus.Labels{labelQuery: q, labelFamily: dht.Family(addr.Addr())}
-	s.queryConcurrency.With(labels).Inc()
+	family := dht.Family(addr.Addr())
+	concurrency := s.queryConcurrency.WithLabelValues(q, family)
+	concurrency.Inc()
 
 	start := time.Now()
 	res, err := s.server.Query(ctx, addr, q, args)
-	s.queryConcurrency.With(labels).Dec()
+
+	concurrency.Dec()
 
 	if err == nil {
-		s.queryDuration.With(labels).Observe(time.Since(start).Seconds())
-		s.querySuccessTotal.With(labels).Inc()
-		s.nodeClientTotal.With(prometheus.Labels{
-			labelFamily: labels[labelFamily],
-			"client":    clientid.Node(res.Msg.ClientID),
-		}).Inc()
+		s.queryDuration.WithLabelValues(q, family).Observe(time.Since(start).Seconds())
+		s.querySuccessTotal.WithLabelValues(q, family).Inc()
+		s.nodeClientTotal.WithLabelValues(family, clientid.Node(res.Msg.ClientID)).Inc()
 	} else {
-		s.queryErrorTotal.With(labels).Inc()
+		s.queryErrorTotal.WithLabelValues(q, family).Inc()
 	}
 
 	return res, err

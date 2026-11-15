@@ -172,7 +172,7 @@ const (
 )
 
 func (c *crawler) countHash(source string, stage string, n int) {
-	c.hashesTotal.With(prometheus.Labels{"source": source, "stage": stage}).Add(float64(n))
+	c.hashesTotal.WithLabelValues(source, stage).Add(float64(n))
 }
 
 type infoHashWithMetaInfo struct {

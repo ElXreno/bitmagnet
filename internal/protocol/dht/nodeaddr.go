@@ -34,6 +34,12 @@ func (a NodeAddr) String() string {
 }
 
 func (a *NodeAddr) UnmarshalBinary(b []byte) error {
+	if len(b) < 2 {
+		*a = NodeAddr{}
+
+		return nil
+	}
+
 	a.IP = make(net.IP, len(b)-2)
 	copy(a.IP, b[:len(b)-2])
 	a.Port = int(binary.BigEndian.Uint16(b[len(b)-2:]))

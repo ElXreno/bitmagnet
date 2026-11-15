@@ -122,12 +122,12 @@ func New(params Params) Result {
 						getPeers: concurrency.NewBufferedConcurrentChannel[nodeHasPeersForHash](
 							10*scalingFactor, 100*scalingFactor),
 						lookups: concurrency.NewBufferedConcurrentChannel[lookupRequest](
-							10*scalingFactor, 40*scalingFactor),
+							10*scalingFactor, 80*scalingFactor),
 						scrape: concurrency.NewBufferedConcurrentChannel[nodeHasPeersForHash](
 							10*scalingFactor, 20*scalingFactor),
 						requestMetaInfo: concurrency.NewBufferedConcurrentChannel[infoHashWithPeers](
 							10*scalingFactor,
-							40*scalingFactor,
+							60*scalingFactor,
 						),
 						persistTorrents: concurrency.NewBatchingChannel[infoHashWithMetaInfo](
 							1000,

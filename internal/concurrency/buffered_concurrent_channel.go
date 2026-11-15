@@ -2,6 +2,7 @@ package concurrency
 
 import (
 	"context"
+	"sync/atomic"
 
 	"golang.org/x/sync/semaphore"
 )
@@ -9,18 +10,22 @@ import (
 type BufferedConcurrentChannel[T any] interface {
 	In() chan<- T
 	Run(context.Context, func(T)) error
+	Len() int
+	Active() int
 }
 
 func NewBufferedConcurrentChannel[T any](capacity int, concurrency int) BufferedConcurrentChannel[T] {
 	return bufferedConcurrentChannel[T]{
-		ch:  make(chan T, capacity),
-		sem: semaphore.NewWeighted(int64(concurrency)),
+		active: &atomic.Int64{},
+		ch:     make(chan T, capacity),
+		sem:    semaphore.NewWeighted(int64(concurrency)),
 	}
 }
 
 type bufferedConcurrentChannel[T any] struct {
-	ch  chan T
-	sem *semaphore.Weighted
+	active *atomic.Int64
+	ch     chan T
+	sem    *semaphore.Weighted
 }
 
 func (ch bufferedConcurrentChannel[T]) In() chan<- T {
@@ -37,10 +42,21 @@ func (ch bufferedConcurrentChannel[T]) Run(ctx context.Context, f func(T)) error
 				return err
 			}
 
+			ch.active.Add(1)
+
 			go func() {
+				defer ch.active.Add(-1)
 				defer ch.sem.Release(1)
 				f(next)
 			}()
 		}
 	}
+}
+
+func (ch bufferedConcurrentChannel[T]) Len() int {
+	return len(ch.ch)
+}
+
+func (ch bufferedConcurrentChannel[T]) Active() int {
+	return int(ch.active.Load())
 }

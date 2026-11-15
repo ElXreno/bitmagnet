@@ -46,6 +46,7 @@ type Result struct {
 	PersistedTotal prometheus.Collector `group:"prometheus_collectors"`
 	HashesTotal    prometheus.Collector `group:"prometheus_collectors"`
 	DialsTotal     prometheus.Collector `group:"prometheus_collectors"`
+	StageGauge     prometheus.Collector `group:"prometheus_collectors"`
 }
 
 func New(params Params) Result {
@@ -65,6 +66,12 @@ func New(params Params) Result {
 		Name:      "hashes_total",
 		Help:      "A counter of info hashes by discovery source and pipeline stage.",
 	}, []string{"source", "stage"})
+	stageGauge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "bitmagnet",
+		Subsystem: "dht_crawler",
+		Name:      "stage_load",
+		Help:      "Queued items and busy workers of each pipeline stage.",
+	}, []string{"stage", "kind"})
 	dialsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "bitmagnet",
 		Subsystem: "dht_crawler",
@@ -109,6 +116,7 @@ func New(params Params) Result {
 						},
 						hashesTotal: hashesTotal,
 						dialsTotal:  dialsTotal,
+						stageGauge:  stageGauge,
 						nodesForPing: concurrency.NewBufferedConcurrentChannel[ktable.Node](
 							scalingFactor, scalingFactor),
 						nodesForFindNode: concurrency.NewBufferedConcurrentChannel[ktable.Node](
@@ -123,6 +131,8 @@ func New(params Params) Result {
 							10*scalingFactor, 100*scalingFactor),
 						lookups: concurrency.NewBufferedConcurrentChannel[lookupRequest](
 							10*scalingFactor, 80*scalingFactor),
+						lookupsInbound: concurrency.NewBufferedConcurrentChannel[lookupRequest](
+							10*scalingFactor, 10*scalingFactor),
 						scrape: concurrency.NewBufferedConcurrentChannel[nodeHasPeersForHash](
 							10*scalingFactor, 20*scalingFactor),
 						requestMetaInfo: concurrency.NewBufferedConcurrentChannel[infoHashWithPeers](
@@ -174,6 +184,7 @@ func New(params Params) Result {
 		PersistedTotal:   persistedTotal,
 		HashesTotal:      hashesTotal,
 		DialsTotal:       dialsTotal,
+		StageGauge:       stageGauge,
 		DhtCrawlerActive: active,
 	}
 }

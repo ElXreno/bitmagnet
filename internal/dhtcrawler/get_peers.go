@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/bitmagnet-io/bitmagnet/internal/concurrency"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
@@ -19,7 +20,7 @@ func (c *crawler) runGetPeers(ctx context.Context) {
 		if req.source != sourceSample {
 			select {
 			case <-ctx.Done():
-			case c.lookups.In() <- lookupRequest{nodeHasPeersForHash: req}:
+			case c.lookupsInbound.In() <- lookupRequest{nodeHasPeersForHash: req}:
 			}
 
 			return
@@ -55,8 +56,8 @@ type lookupRequest struct {
 	seeds []client.NodeInfo
 }
 
-func (c *crawler) runLookups(ctx context.Context) {
-	_ = c.lookups.Run(ctx, func(req lookupRequest) {
+func (c *crawler) runLookups(ctx context.Context, ch concurrency.BufferedConcurrentChannel[lookupRequest]) {
+	_ = ch.Run(ctx, func(req lookupRequest) {
 		found := c.lookupPeers(ctx, req.source, req.infoHash, req.seeds)
 		if len(found) == 0 {
 			c.countHash(req.source, stageLookupEmpty, 1)

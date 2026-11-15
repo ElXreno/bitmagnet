@@ -58,7 +58,7 @@ func NewReceiver(clientID protocol.ID, timeout time.Duration) Receiver {
 }
 
 // the file tree decoder copies a subtree once per level above it, so few meta infos are parsed at a time
-func (r Receiver) parse(infoHash protocol.ID, encoded []byte) (metainfo.Info, error) {
+func (r Receiver) parse(infoHash protocol.ID, encoded []byte) (metainfo.Info, metainfo.Identity, error) {
 	r.parsing <- struct{}{}
 
 	defer func() {
@@ -66,10 +66,10 @@ func (r Receiver) parse(infoHash protocol.ID, encoded []byte) (metainfo.Info, er
 	}()
 
 	if bencodeUnsafe(encoded, incomingMaxDepth) {
-		return metainfo.Info{}, errIncomingBencode
+		return metainfo.Info{}, metainfo.Identity{}, errIncomingBencode
 	}
 
-	return metainfo.ParseMetaInfoBytes(infoHash, encoded)
+	return metainfo.ParseMetaInfo(infoHash, encoded)
 }
 
 func (r Receiver) PeerID() protocol.ID {
@@ -236,7 +236,7 @@ func (in *Incoming) Fetch() (Response, error) {
 		return Response{}, piecesErr
 	}
 
-	parsed, parseErr := in.receiver.parse(in.InfoHash, pieces)
+	parsed, identity, parseErr := in.receiver.parse(in.InfoHash, pieces)
 	if parseErr != nil {
 		outcome("bad_metainfo")
 
@@ -248,6 +248,7 @@ func (in *Incoming) Fetch() (Response, error) {
 	return Response{
 		HandshakeInfo: hsInfo,
 		Info:          parsed,
+		Identity:      identity,
 		Encrypted:     in.Encrypted,
 		Transport:     "tcp",
 	}, nil

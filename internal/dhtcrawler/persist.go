@@ -175,19 +175,26 @@ func createTorrentModel(
 		private = *info.Private
 	}
 
+	infoFiles := info.Files
+	if len(infoFiles) == 0 && info.HasV2() {
+		if tree := info.UpvertedFiles(); len(tree) > 1 || (len(tree) == 1 && len(tree[0].Path) > 1) {
+			infoFiles = tree
+		}
+	}
+
 	var filesCount model.NullUint
 
 	filesStatus := model.FilesStatusSingle
-	if len(info.Files) > 0 {
+	if len(infoFiles) > 0 {
 		filesStatus = model.FilesStatusMulti
-		filesCount = model.NewNullUint(uint(len(info.Files)))
+		filesCount = model.NewNullUint(uint(len(infoFiles)))
 	}
 
-	files := make([]model.TorrentFile, 0, min(int(saveFilesThreshold), len(info.Files)))
+	files := make([]model.TorrentFile, 0, min(int(saveFilesThreshold), len(infoFiles)))
 
-	seenPaths := make(map[string]struct{}, min(int(saveFilesThreshold), len(info.Files)))
+	seenPaths := make(map[string]struct{}, min(int(saveFilesThreshold), len(infoFiles)))
 
-	for i, file := range info.Files {
+	for i, file := range infoFiles {
 		if i >= int(saveFilesThreshold) {
 			filesStatus = model.FilesStatusOverThreshold
 			break

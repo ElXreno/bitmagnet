@@ -153,6 +153,11 @@ func New(params Params) Result {
 						return err
 					}
 
+					aliases, err := newFailedHashes("alias_hashes", 30*24*time.Hour, 24*time.Hour, 1_000_000)
+					if err != nil {
+						return err
+					}
+
 					if os.Getenv("BITMAGNET_FAILED_MEMORY") != "off" {
 						failed, err = newFailedHashes(
 							"failed_hashes", time.Duration(envInt("BITMAGNET_FAILED_TTL_HOURS", 6))*time.Hour, time.Hour, 4_000_000)
@@ -219,6 +224,7 @@ func New(params Params) Result {
 						failed:        failed,
 						failedSeeded:  failedSeeded,
 						closedSwarms:  closedSwarms,
+						aliases:       aliases,
 						fetched: &ignoreFilter{
 							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
 						},
@@ -287,6 +293,10 @@ func New(params Params) Result {
 					}
 
 					if err := c.closedSwarms.save(); err != nil {
+						return err
+					}
+
+					if err := c.aliases.save(); err != nil {
 						return err
 					}
 

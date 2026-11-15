@@ -111,6 +111,12 @@ func (c *crawler) runInfoHashTriage(
 						continue
 					}
 
+					if c.aliases.test(r.infoHash) {
+						c.countHash(r.source, "alias_known", 1)
+
+						continue
+					}
+
 					if c.failed.test(r.infoHash) || c.failedSeeded.test(r.infoHash) {
 						c.countHash(r.source, "recently_failed", 1)
 

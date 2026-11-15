@@ -24,7 +24,7 @@ const (
 	trackerScrapeTimeout = 3 * time.Second
 
 	trackerAnnounceQueue    = 2000
-	trackerAnnounceSkips    = 8
+	trackerScrapeSettle     = 800 * time.Millisecond
 	trackerAnnounceIdleWait = 20 * time.Millisecond
 	trackerAnnounceNumWant  = 30
 )
@@ -73,6 +73,7 @@ type trackerInfo struct {
 	seeders   uint32
 	leechers  uint32
 	seededBy  uint32
+	best      uint8
 	announced bool
 }
 
@@ -97,7 +98,7 @@ type trackerScraper struct {
 	client           *tracker.Client
 	limiters         []*rate.Limiter
 	in               chan protocol.ID
-	announces        [announcePriorities]chan protocol.ID
+	announces        [][announcePriorities]chan protocol.ID
 	announceEnabled  bool
 	announceLimiters []*rate.Limiter
 	announceParams   tracker.AnnounceParams
@@ -143,8 +144,12 @@ func newTrackerScraper(metrics trackerMetrics) (*trackerScraper, error) {
 
 		scraper.announceEnabled = true
 
+		scraper.announces = make([][announcePriorities]chan protocol.ID, len(hosts))
+
 		for i := range scraper.announces {
-			scraper.announces[i] = make(chan protocol.ID, trackerAnnounceQueue)
+			for priority := range scraper.announces[i] {
+				scraper.announces[i][priority] = make(chan protocol.ID, trackerAnnounceQueue)
+			}
 		}
 
 		scraper.announceLimiters = make([]*rate.Limiter, len(hosts))
@@ -220,15 +225,7 @@ func (s *trackerScraper) run(ctx context.Context) {
 		hashes := batch
 		batch = make([]protocol.ID, 0, tracker.MaxScrapeHashes)
 
-		for i, host := range s.client.Trackers() {
-			if !s.limiters[i].Allow() {
-				s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "rate_limited"}).Inc()
-
-				continue
-			}
-
-			go s.scrape(ctx, i, host, hashes)
-		}
+		go s.scrapeBatch(ctx, hashes)
 	}
 
 	for {
@@ -242,6 +239,85 @@ func (s *trackerScraper) run(ctx context.Context) {
 			}
 		case <-ticker.C:
 			flush()
+		}
+	}
+}
+
+// scrapeBatch asks every tracker about the batch, gives the answers a moment to arrive and then queues the
+// seeded hashes for an announce on the tracker that saw the most seeders.
+func (s *trackerScraper) scrapeBatch(ctx context.Context, hashes []protocol.ID) {
+	var wg sync.WaitGroup
+
+	for i, host := range s.client.Trackers() {
+		if !s.limiters[i].Allow() {
+			s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "rate_limited"}).Inc()
+
+			continue
+		}
+
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			s.scrape(ctx, i, host, hashes)
+		}()
+	}
+
+	if !s.announceEnabled {
+		return
+	}
+
+	settled := make(chan struct{})
+
+	go func() {
+		wg.Wait()
+		close(settled)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return
+	case <-settled:
+	case <-time.After(trackerScrapeSettle):
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, hash := range hashes {
+		info, ok := s.cache.Get(hash)
+		if !ok || info.seeders == 0 || info.announced {
+			continue
+		}
+
+		priority := announcePriority(info.seeders)
+		swarm := trackerSource(info.seeders)
+		queued := false
+
+		for offset := range len(s.announces) {
+			index := (int(info.best) + offset) % len(s.announces)
+			if offset > 0 && info.seededBy&(1<<index) == 0 {
+				continue
+			}
+
+			select {
+			case s.announces[index][priority] <- hash:
+				queued = true
+			default:
+			}
+
+			if queued {
+				break
+			}
+		}
+
+		if queued {
+			info.announced = true
+			s.cache.Add(hash, info)
+			s.metrics.hashes.With(prometheus.Labels{"tracker": "queued", "swarm": swarm}).Inc()
+		} else {
+			s.metrics.hashes.With(prometheus.Labels{"tracker": "queue_full", "swarm": swarm}).Inc()
 		}
 	}
 }
@@ -278,24 +354,16 @@ func (s *trackerScraper) scrape(ctx context.Context, index int, host string, has
 		s.metrics.hashes.With(prometheus.Labels{"tracker": host, "swarm": swarm}).Inc()
 
 		info, _ := s.cache.Get(hashes[i])
+
+		if r.Seeders > info.seeders {
+			info.best = uint8(index)
+		}
+
 		info.seeders = max(info.seeders, r.Seeders)
 		info.leechers = max(info.leechers, r.Leechers)
 
 		if r.Seeders > 0 {
 			info.seededBy |= 1 << index
-		}
-
-		if s.announceEnabled && r.Seeders > 0 && !info.announced {
-			priority := announcePriority(r.Seeders)
-
-			select {
-			case s.announces[priority] <- hashes[i]:
-				info.announced = true
-
-				s.metrics.hashes.With(prometheus.Labels{"tracker": "queued", "swarm": trackerSource(r.Seeders)}).Inc()
-			default:
-				s.metrics.hashes.With(prometheus.Labels{"tracker": "queue_full", "swarm": trackerSource(r.Seeders)}).Inc()
-			}
 		}
 
 		s.cache.Add(hashes[i], info)
@@ -324,35 +392,15 @@ func (c *crawler) unseeded(hash protocol.ID) bool {
 	return swarm == "leechers" || swarm == "unknown"
 }
 
-// nextAnnounce pops the best queued hash that tracker number index reported seeders for. Hashes it has to pass
-// over go back to their queue.
+// nextAnnounce pops the queued hash with the most seeders for tracker number index.
 func (s *trackerScraper) nextAnnounce(index int) (protocol.ID, trackerInfo, bool) {
-	for priority, queue := range s.announces {
-		for range trackerAnnounceSkips {
-			var hash protocol.ID
-
-			select {
-			case hash = <-queue:
-			default:
-			}
-
-			if hash.IsZero() {
-				break
-			}
-
+	for _, queue := range s.announces[index] {
+		select {
+		case hash := <-queue:
 			info, _ := s.cache.Get(hash)
-			if info.seededBy&(1<<index) != 0 {
-				return hash, info, true
-			}
 
-			if info.seededBy == 0 {
-				continue
-			}
-
-			select {
-			case s.announces[priority] <- hash:
-			default:
-			}
+			return hash, info, true
+		default:
 		}
 	}
 

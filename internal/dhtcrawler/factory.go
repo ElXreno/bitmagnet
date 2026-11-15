@@ -127,11 +127,18 @@ func New(params Params) Result {
 					if err != nil {
 						return err
 					}
-					var failed *failedHashes
+					var failed, failedSeeded *failedHashes
 
 					if os.Getenv("BITMAGNET_FAILED_MEMORY") != "off" {
 						failed, err = newFailedHashes(
-							"failed_hashes", time.Duration(envInt("BITMAGNET_FAILED_TTL_HOURS", 6))*time.Hour)
+							"failed_hashes", time.Duration(envInt("BITMAGNET_FAILED_TTL_HOURS", 6))*time.Hour, time.Hour, 4_000_000)
+						if err != nil {
+							return err
+						}
+
+						failedSeeded, err = newFailedHashes(
+							"failed_hashes_seeded",
+							time.Duration(envInt("BITMAGNET_FAILED_SEEDED_TTL_MINUTES", 60))*time.Minute, 10*time.Minute, 500_000)
 						if err != nil {
 							return err
 						}
@@ -184,6 +191,7 @@ func New(params Params) Result {
 						trackers:      trackers,
 						trackers6:     trackers6,
 						failed:        failed,
+						failedSeeded:  failedSeeded,
 						fetched: &ignoreFilter{
 							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
 						},
@@ -243,6 +251,10 @@ func New(params Params) Result {
 					}
 
 					if err := c.failed.save(); err != nil {
+						return err
+					}
+
+					if err := c.failedSeeded.save(); err != nil {
 						return err
 					}
 

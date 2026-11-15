@@ -48,6 +48,7 @@ type crawler struct {
 	trackers6                    *trackerScraper
 	fetched                      *ignoreFilter
 	failed                       *failedHashes
+	failedSeeded                 *failedHashes
 	infoHashTriage               concurrency.BatchingChannel[nodeHasPeersForHash]
 	getPeers                     concurrency.BufferedConcurrentChannel[nodeHasPeersForHash]
 	lookups                      concurrency.BufferedConcurrentChannel[lookupRequest]
@@ -228,8 +229,10 @@ func (c *crawler) saveFailedHashes(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-time.After(time.Minute):
-			if err := c.failed.save(); err != nil {
-				c.logger.Errorf("failed to save the failed info hash memory: %s", err.Error())
+			for _, memory := range []*failedHashes{c.failed, c.failedSeeded} {
+				if err := memory.save(); err != nil {
+					c.logger.Errorf("failed to save the failed info hash memory: %s", err.Error())
+				}
 			}
 		}
 	}
@@ -237,5 +240,11 @@ func (c *crawler) saveFailedHashes(ctx context.Context) {
 
 // giveUp records that the meta info of hash could not be fetched, so that it is left alone for a while.
 func (c *crawler) giveUp(hash protocol.ID) {
+	if c.failedSeeded != nil && (c.trackers.swarm(hash) == "seeded" || c.trackers6.swarm(hash) == "seeded") {
+		c.failedSeeded.add(hash)
+
+		return
+	}
+
 	c.failed.add(hash)
 }

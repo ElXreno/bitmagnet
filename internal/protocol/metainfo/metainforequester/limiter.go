@@ -65,3 +65,26 @@ var peerClientTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name:      "peer_client_total",
 	Help:      "A counter of peers by BitTorrent client, at the handshake and after a complete meta info fetch.",
 }, []string{"client", "stage"})
+
+var peerExtensionTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: namespace,
+	Subsystem: subsystem,
+	Name:      "peer_extension_total",
+	Help:      "A counter of peers by what their extended handshake offers.",
+}, []string{"extension"})
+
+func countPeerExtensions(handshake *rootDict) {
+	offered := map[string]bool{
+		"any":           true,
+		"ut_metadata":   handshake.M.UTMetadata > 0,
+		"metadata_size": handshake.MetadataSize > 0,
+		"ut_pex":        handshake.M.UTPex > 0,
+		"ut_holepunch":  handshake.M.UTHolepunch > 0,
+	}
+
+	for extension, yes := range offered {
+		if yes {
+			peerExtensionTotal.With(prometheus.Labels{"extension": extension}).Inc()
+		}
+	}
+}

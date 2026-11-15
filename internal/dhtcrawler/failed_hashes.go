@@ -14,8 +14,6 @@ import (
 )
 
 const (
-	failedHashesSpan       = time.Hour
-	failedHashesPerSpan    = 4_000_000
 	failedHashesFalseRate  = 0.001
 	failedHashesFilePrefix = "failed-"
 	failedHashesFileSuffix = ".bloom"
@@ -27,20 +25,24 @@ const (
 type failedHashes struct {
 	mu          sync.Mutex
 	dir         string
+	span        time.Duration
+	perSpan     uint
 	keep        int64
 	generations map[int64]*boom.BloomFilter
 	dirty       map[int64]bool
 	now         func() time.Time
 }
 
-func newFailedHashes(dir string, ttl time.Duration) (*failedHashes, error) {
+func newFailedHashes(dir string, ttl time.Duration, span time.Duration, perSpan uint) (*failedHashes, error) {
 	if ttl <= 0 {
 		return nil, nil //nolint:nilnil
 	}
 
 	f := &failedHashes{
 		dir:         dir,
-		keep:        int64(ttl / failedHashesSpan),
+		span:        span,
+		perSpan:     perSpan,
+		keep:        int64(ttl / span),
 		generations: make(map[int64]*boom.BloomFilter),
 		dirty:       make(map[int64]bool),
 		now:         time.Now,
@@ -82,7 +84,7 @@ func newFailedHashes(dir string, ttl time.Duration) (*failedHashes, error) {
 			continue
 		}
 
-		filter := boom.NewBloomFilter(failedHashesPerSpan, failedHashesFalseRate)
+		filter := boom.NewBloomFilter(f.perSpan, failedHashesFalseRate)
 		_, readErr := filter.ReadFrom(file)
 		_ = file.Close()
 
@@ -95,7 +97,7 @@ func newFailedHashes(dir string, ttl time.Duration) (*failedHashes, error) {
 }
 
 func (f *failedHashes) generation() int64 {
-	return f.now().Unix() / int64(failedHashesSpan/time.Second)
+	return f.now().Unix() / int64(f.span/time.Second)
 }
 
 func (f *failedHashes) test(hash protocol.ID) bool {
@@ -129,7 +131,7 @@ func (f *failedHashes) add(hash protocol.ID) {
 
 	filter, ok := f.generations[generation]
 	if !ok {
-		filter = boom.NewBloomFilter(failedHashesPerSpan, failedHashesFalseRate)
+		filter = boom.NewBloomFilter(f.perSpan, failedHashesFalseRate)
 		f.generations[generation] = filter
 	}
 

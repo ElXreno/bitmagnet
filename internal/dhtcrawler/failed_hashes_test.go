@@ -14,7 +14,7 @@ func TestFailedHashesSurviveRestartAndExpire(t *testing.T) {
 	dir := t.TempDir()
 	clock := time.Unix(1_700_000_000, 0)
 
-	f, err := newFailedHashes(dir, 3*time.Hour)
+	f, err := newFailedHashes(dir, 3*time.Hour, time.Hour, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestFailedHashesSurviveRestartAndExpire(t *testing.T) {
 	}
 
 	// newFailedHashes reads the real clock, so load with a memory long enough to cover the fixed test time.
-	reloaded, err := newFailedHashes(dir, time.Since(clock)+3*time.Hour)
+	reloaded, err := newFailedHashes(dir, time.Since(clock)+3*time.Hour, time.Hour, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestFailedHashesSurviveRestartAndExpire(t *testing.T) {
 func TestFailedHashesDisabled(t *testing.T) {
 	t.Parallel()
 
-	f, err := newFailedHashes(t.TempDir(), 0)
+	f, err := newFailedHashes(t.TempDir(), 0, time.Hour, 1000)
 	if err != nil || f != nil {
 		t.Fatalf("a zero lifetime disables the memory, got %v %v", f, err)
 	}

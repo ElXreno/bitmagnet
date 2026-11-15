@@ -322,7 +322,9 @@ type rootDict struct {
 }
 
 type mDict struct {
-	UTMetadata int `bencode:"ut_metadata"`
+	UTMetadata  int `bencode:"ut_metadata"`
+	UTPex       int `bencode:"ut_pex"`
+	UTHolepunch int `bencode:"ut_holepunch"`
 }
 
 type extDict struct {
@@ -356,6 +358,8 @@ func exHandshake(rw io.ReadWriter) (metadataSize uint, utMetadata uint8, err err
 		err = unmarshalErr
 		return
 	}
+
+	countPeerExtensions(rRootDict)
 
 	if 0 >= rRootDict.MetadataSize || rRootDict.MetadataSize >= maxMetadataSize {
 		err = errors.New("metadata too big or its size is less than or equal zero")

@@ -25,6 +25,7 @@ type Params struct {
 type Result struct {
 	fx.Out
 	Requester           Requester
+	Receiver            Receiver
 	RequestDuration     prometheus.Collector `group:"prometheus_collectors"`
 	RequestSuccessTotal prometheus.Collector `group:"prometheus_collectors"`
 	RequestErrorTotal   prometheus.Collector `group:"prometheus_collectors"`
@@ -46,9 +47,11 @@ func New(p Params) Result {
 		}
 	}
 
+	clientID := protocol.RandomPeerID()
+
 	collector := newPrometheusCollector(requester{
 		utp:      utpSocket,
-		clientID: protocol.RandomPeerID(),
+		clientID: clientID,
 		timeout:  p.Config.RequestTimeout,
 		dialer: &net.Dialer{
 			Timeout:   dialTimeout(),
@@ -68,6 +71,7 @@ func New(p Params) Result {
 			},
 			limiter: concurrency.NewKeyedLimiter(rate.Every(time.Second/8), 8, 100_000, time.Second*20),
 		},
+		Receiver:            NewReceiver(clientID, IncomingTimeout),
 		RequestDuration:     collector.requestDuration,
 		RequestSuccessTotal: collector.requestSuccessTotal,
 		RequestErrorTotal:   collector.requestErrorTotal,

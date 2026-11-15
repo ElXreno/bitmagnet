@@ -73,7 +73,7 @@ var peerExtensionTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Help:      "A counter of peers by what their extended handshake offers.",
 }, []string{"extension"})
 
-func countPeerExtensions(handshake *rootDict) {
+func countPeerExtensions(prefix string, handshake *rootDict) {
 	offered := map[string]bool{
 		"any":           true,
 		"ut_metadata":   handshake.M.UTMetadata > 0,
@@ -84,7 +84,7 @@ func countPeerExtensions(handshake *rootDict) {
 
 	for extension, yes := range offered {
 		if yes {
-			peerExtensionTotal.With(prometheus.Labels{"extension": extension}).Inc()
+			peerExtensionTotal.With(prometheus.Labels{"extension": prefix + extension}).Inc()
 		}
 	}
 }

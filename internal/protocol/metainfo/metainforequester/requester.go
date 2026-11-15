@@ -398,7 +398,18 @@ func readExHandshake(rw io.ReadWriter) (*rootDict, error) {
 		}
 	}
 
-	rExMessage, readErr := readExMessage(rw)
+	rRootDict, readErr := readExHandshakeDict(rw)
+	if readErr != nil {
+		return nil, readErr
+	}
+
+	countPeerExtensions("", rRootDict)
+
+	return rRootDict, nil
+}
+
+func readExHandshakeDict(r io.Reader) (*rootDict, error) {
+	rExMessage, readErr := readExMessage(r)
 	if readErr != nil {
 		return nil, readErr
 	}
@@ -411,8 +422,6 @@ func readExHandshake(rw io.ReadWriter) (*rootDict, error) {
 	if unmarshalErr := bencode.Unmarshal(rExMessage[2:], rRootDict); unmarshalErr != nil {
 		return nil, unmarshalErr
 	}
-
-	countPeerExtensions(rRootDict)
 
 	return rRootDict, nil
 }

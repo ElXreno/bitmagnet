@@ -135,6 +135,12 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 				c.logger.Debugw("persisted torrents", "count", len(torrentsToPersist))
 
 				for _, i := range hashMap {
+					c.countHash(i.source, stagePersisted, 1)
+
+					if i.source != sourceSample {
+						continue
+					}
+
 					select {
 					case <-ctx.Done():
 						return

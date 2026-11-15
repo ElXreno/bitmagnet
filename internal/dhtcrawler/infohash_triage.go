@@ -86,14 +86,25 @@ func (c *crawler) runInfoHashTriage(ctx context.Context) {
 					t.FilesStatus == model.FilesStatusNoInfo ||
 					(t.FilesStatus != model.FilesStatusSingle && !t.FilesCount.Valid) ||
 					(t.FilesStatus == model.FilesStatusOverThreshold && t.FilesCount.Uint <= c.saveFilesThreshold) {
+					c.countHash(r.source, stageNeedsMetaInfo, 1)
+
+					if len(r.peers) > 0 {
+						select {
+						case <-ctx.Done():
+							return
+						case c.requestMetaInfo.In() <- infoHashWithPeers{nodeHasPeersForHash: r, peers: r.peers}:
+							continue
+						}
+					}
+
 					select {
 					case <-ctx.Done():
 						return
 					case c.getPeers.In() <- r:
 						continue
 					}
-				} else if (!t.Seeders.Valid || !t.Leechers.Valid) ||
-					t.UpdatedAt.Before(time.Now().Add(-c.rescrapeThreshold)) {
+				} else if r.source == sourceSample && ((!t.Seeders.Valid || !t.Leechers.Valid) ||
+					t.UpdatedAt.Before(time.Now().Add(-c.rescrapeThreshold))) {
 					select {
 					case <-ctx.Done():
 						return

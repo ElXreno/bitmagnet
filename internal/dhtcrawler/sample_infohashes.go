@@ -46,9 +46,12 @@ func (c *crawler) runSampleInfoHashes(ctx context.Context) {
 				discoveredHashes = append(discoveredHashes, nodeHasPeersForHash{
 					infoHash: s,
 					node:     n.Addr(),
+					source:   sourceSample,
 				})
 			}
 		}
+
+		c.countHash(sourceSample, stageDiscovered, len(discoveredHashes))
 
 		for _, h := range discoveredHashes {
 			select {

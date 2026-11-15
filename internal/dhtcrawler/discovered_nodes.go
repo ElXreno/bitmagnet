@@ -7,6 +7,7 @@ import (
 
 	"github.com/bitmagnet-io/bitmagnet/internal/concurrency"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/responder"
 	"go.uber.org/fx"
 )
 
@@ -18,6 +19,7 @@ type DiscoveredNodesParams struct {
 type DiscoveredNodesResult struct {
 	fx.Out
 	DiscoveredNodes concurrency.BatchingChannel[ktable.Node] `name:"dht_discovered_nodes"`
+	InboundHashes   chan responder.InboundHash               `name:"dht_inbound_hashes"`
 }
 
 // NewDiscoveredNodes creates the channel for discovered nodes.
@@ -27,6 +29,7 @@ func NewDiscoveredNodes(params DiscoveredNodesParams) DiscoveredNodesResult {
 	return DiscoveredNodesResult{
 		DiscoveredNodes: concurrency.NewBatchingChannel[ktable.Node](
 			int(100*params.Config.ScalingFactor), 10, time.Second/100),
+		InboundHashes: make(chan responder.InboundHash, int(100*params.Config.ScalingFactor)),
 	}
 }
 

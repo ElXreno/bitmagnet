@@ -12,6 +12,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/responder"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/banning"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
 	"github.com/bitmagnet-io/bitmagnet/internal/worker"
@@ -32,6 +33,7 @@ type Params struct {
 	Dao               lazy.Lazy[*dao.Query]
 	BlockingManager   lazy.Lazy[blocking.Manager]
 	DiscoveredNodes   concurrency.BatchingChannel[ktable.Node] `name:"dht_discovered_nodes"`
+	InboundHashes     chan responder.InboundHash               `name:"dht_inbound_hashes"`
 	Logger            *zap.SugaredLogger
 }
 
@@ -42,6 +44,7 @@ type Result struct {
 	DhtCrawlerActive *concurrency.AtomicValue[bool] `name:"dht_crawler_active"`
 
 	PersistedTotal prometheus.Collector `group:"prometheus_collectors"`
+	HashesTotal    prometheus.Collector `group:"prometheus_collectors"`
 }
 
 func New(params Params) Result {
@@ -55,6 +58,12 @@ func New(params Params) Result {
 		Name:      "persisted_total",
 		Help:      "A counter of persisted database entities.",
 	}, []string{"entity"})
+	hashesTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bitmagnet",
+		Subsystem: "dht_crawler",
+		Name:      "hashes_total",
+		Help:      "A counter of info hashes by discovery source and pipeline stage.",
+	}, []string{"source", "stage"})
 
 	return Result{
 		Worker: worker.NewWorker(
@@ -85,6 +94,11 @@ func New(params Params) Result {
 						getOldestNodesInterval:       time.Second * 10,
 						oldPeerThreshold:             time.Minute * 15,
 						discoveredNodes:              params.DiscoveredNodes,
+						inboundHashes:                params.InboundHashes,
+						inboundSeen: &ignoreFilter{
+							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
+						},
+						hashesTotal: hashesTotal,
 						nodesForPing: concurrency.NewBufferedConcurrentChannel[ktable.Node](
 							scalingFactor, scalingFactor),
 						nodesForFindNode: concurrency.NewBufferedConcurrentChannel[ktable.Node](
@@ -146,6 +160,7 @@ func New(params Params) Result {
 			},
 		),
 		PersistedTotal:   persistedTotal,
+		HashesTotal:      hashesTotal,
 		DhtCrawlerActive: active,
 	}
 }

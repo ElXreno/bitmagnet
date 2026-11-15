@@ -13,6 +13,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/responder"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/banning"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
@@ -31,6 +32,9 @@ type crawler struct {
 	getOldestNodesInterval       time.Duration
 	oldPeerThreshold             time.Duration
 	discoveredNodes              concurrency.BatchingChannel[ktable.Node]
+	inboundHashes                <-chan responder.InboundHash
+	inboundSeen                  *ignoreFilter
+	hashesTotal                  *prometheus.CounterVec
 	nodesForPing                 concurrency.BufferedConcurrentChannel[ktable.Node]
 	nodesForFindNode             concurrency.BufferedConcurrentChannel[ktable.Node]
 	nodesForSampleInfoHashes     concurrency.BufferedConcurrentChannel[ktable.Node]
@@ -71,6 +75,7 @@ func (c *crawler) start() {
 	go c.runSampleInfoHashes(ctx)
 	go c.getNodesForSampleInfoHashes(ctx)
 	go c.runInfoHashTriage(ctx)
+	go c.runInboundHashes(ctx)
 	go c.runGetPeers(ctx)
 	go c.runRequestMetaInfo(ctx)
 	go c.runScrape(ctx)
@@ -84,6 +89,19 @@ func (c *crawler) start() {
 type nodeHasPeersForHash struct {
 	infoHash protocol.ID
 	node     netip.AddrPort
+	source   string
+	peers    []netip.AddrPort
+}
+
+const (
+	sourceSample       = "sample_infohashes"
+	stageDiscovered    = "discovered"
+	stageNeedsMetaInfo = "needs_metainfo"
+	stagePersisted     = "persisted"
+)
+
+func (c *crawler) countHash(source string, stage string, n int) {
+	c.hashesTotal.With(prometheus.Labels{"source": source, "stage": stage}).Add(float64(n))
 }
 
 type infoHashWithMetaInfo struct {

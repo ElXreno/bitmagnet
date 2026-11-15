@@ -17,6 +17,7 @@ type Params struct {
 	fx.In
 	KTable          ktable.Table
 	DiscoveredNodes concurrency.BatchingChannel[ktable.Node] `name:"dht_discovered_nodes"`
+	InboundHashes   chan InboundHash                         `name:"dht_inbound_hashes"`
 	Logger          *zap.SugaredLogger
 }
 
@@ -42,18 +43,21 @@ func New(p Params) Result {
 			tokenSecret:              protocol.RandomNodeID().Bytes(),
 			sampleInfoHashesInterval: 10,
 		},
-		limiter: NewLimiter(rate.Every(time.Second/50), 20, rate.Every(time.Second), 10, 1000, time.Second*20),
+		limiter: NewLimiter(rate.Every(time.Second/500), 200, rate.Every(time.Second), 10, 1000, time.Second*20),
 	})
 
 	return Result{
-		Responder: responderNodeDiscovery{
-			responder: responderLogger{
-				responder: collector,
-				logger: p.Logger.WithOptions(zap.WrapCore(func(core zapcore.Core) zapcore.Core {
-					return zapcore.NewSamplerWithOptions(core, time.Minute, 10, 0)
-				})).Named(subsystem),
+		Responder: responderHashDiscovery{
+			inboundHashes: p.InboundHashes,
+			responder: responderNodeDiscovery{
+				responder: responderLogger{
+					responder: collector,
+					logger: p.Logger.WithOptions(zap.WrapCore(func(core zapcore.Core) zapcore.Core {
+						return zapcore.NewSamplerWithOptions(core, time.Minute, 10, 0)
+					})).Named(subsystem),
+				},
+				discoveredNodes: p.DiscoveredNodes.In(),
 			},
-			discoveredNodes: p.DiscoveredNodes.In(),
 		},
 		QueryDuration:     collector.queryDuration,
 		QuerySuccessTotal: collector.querySuccessTotal,

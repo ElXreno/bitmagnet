@@ -105,6 +105,12 @@ func (c *crawler) runInfoHashTriage(
 					t.FilesStatus == model.FilesStatusNoInfo ||
 					(t.FilesStatus != model.FilesStatusSingle && !t.FilesCount.Valid) ||
 					(t.FilesStatus == model.FilesStatusOverThreshold && t.FilesCount.Uint <= c.saveFilesThreshold) {
+					if c.closedSwarms.test(r.infoHash) {
+						c.countHash(r.source, "closed_swarm_known", 1)
+
+						continue
+					}
+
 					if c.failed.test(r.infoHash) || c.failedSeeded.test(r.infoHash) {
 						c.countHash(r.source, "recently_failed", 1)
 

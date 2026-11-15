@@ -40,6 +40,8 @@ type crawler struct {
 	dialsTotal                   *prometheus.CounterVec
 	stageGauge                   *prometheus.GaugeVec
 	probeTotal                   *prometheus.CounterVec
+	swarmTotal                   *prometheus.CounterVec
+	peerDialTotal                *prometheus.CounterVec
 	lookupQueries                *prometheus.HistogramVec
 	classTotal                   *prometheus.CounterVec
 	deadPeers                    *ignoreFilter
@@ -49,6 +51,7 @@ type crawler struct {
 	fetched                      *ignoreFilter
 	failed                       *failedHashes
 	failedSeeded                 *failedHashes
+	closedSwarms                 *failedHashes
 	inbound                      *inboundPeers
 	infoHashTriage               concurrency.BatchingChannel[nodeHasPeersForHash]
 	getPeers                     concurrency.BufferedConcurrentChannel[nodeHasPeersForHash]
@@ -232,7 +235,7 @@ func (c *crawler) saveFailedHashes(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-time.After(time.Minute):
-			for _, memory := range []*failedHashes{c.failed, c.failedSeeded} {
+			for _, memory := range []*failedHashes{c.failed, c.failedSeeded, c.closedSwarms} {
 				if err := memory.save(); err != nil {
 					c.logger.Errorf("failed to save the failed info hash memory: %s", err.Error())
 				}
@@ -243,11 +246,15 @@ func (c *crawler) saveFailedHashes(ctx context.Context) {
 
 // giveUp records that the meta info of hash could not be fetched, so that it is left alone for a while.
 func (c *crawler) giveUp(hash protocol.ID) {
-	if c.failedSeeded != nil && (c.trackers.swarm(hash) == "seeded" || c.trackers6.swarm(hash) == "seeded") {
+	if c.failedSeeded != nil && c.seeded(hash) {
 		c.failedSeeded.add(hash)
 
 		return
 	}
 
 	c.failed.add(hash)
+}
+
+func (c *crawler) seeded(hash protocol.ID) bool {
+	return c.trackers.swarm(hash) == "seeded" || c.trackers6.swarm(hash) == "seeded"
 }

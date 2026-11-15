@@ -33,7 +33,7 @@ func (a serverAdapter) Ping(ctx context.Context, addr netip.AddrPort) (PingResul
 		return PingResult{}, err
 	}
 
-	return PingResult{ID: res.Msg.R.ID}, nil
+	return PingResult{ID: res.Msg.R.ID, ClientID: res.Msg.ClientID}, nil
 }
 
 func (a serverAdapter) FindNode(

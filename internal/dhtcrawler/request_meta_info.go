@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/clientid"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/server"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
 	"github.com/prometheus/client_golang/prometheus"
@@ -16,6 +17,20 @@ import (
 var errBanned = errors.New("banned")
 
 var errNoCandidates = errors.New("no peers worth dialing")
+
+var errClosedSwarm = errors.New("swarm of a closed network")
+
+const (
+	implSilent     = "silent"
+	implRegular    = "regular"
+	implClosedHint = "closed_hint"
+)
+
+var errClosedSwarmHint = errors.New("every answering peer is a node of a closed network")
+
+var closedSwarmPolicy = os.Getenv("BITMAGNET_CLOSED_SWARM") != "off"
+
+var closedSwarmHintPolicy = closedSwarmPolicy && os.Getenv("BITMAGNET_CLOSED_SWARM_HINT") != "off"
 
 func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 	_ = c.requestMetaInfo.Run(ctx, func(req infoHashWithPeers) {
@@ -30,6 +45,19 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 			if errors.Is(reqErr, errBanned) {
 				c.countHash(req.source, stageBanned, 1)
 				c.trackerOutcome(req.infoHash, stageBanned)
+			} else if errors.Is(reqErr, errClosedSwarm) {
+				c.countHash(req.source, "closed_swarm", 1)
+				c.trackerOutcome(req.infoHash, "closed_swarm")
+
+				if closedSwarmPolicy {
+					c.closedSwarms.add(req.infoHash)
+				} else {
+					c.giveUp(req.infoHash)
+				}
+			} else if errors.Is(reqErr, errClosedSwarmHint) {
+				c.countHash(req.source, "closed_swarm_hint", 1)
+				c.trackerOutcome(req.infoHash, "closed_swarm_hint")
+				c.closedSwarms.add(req.infoHash)
 			} else if errors.Is(reqErr, errNoCandidates) {
 				c.countHash(req.source, "no_candidates", 1)
 				c.trackerOutcome(req.infoHash, "no_candidates")
@@ -82,6 +110,7 @@ func (c *crawler) doRequestMetaInfo(
 		err    error
 		silent bool
 		addr   netip.AddrPort
+		impl   string
 	}
 
 	dialCtx, cancel := context.WithCancel(ctx)
@@ -91,13 +120,14 @@ func (c *crawler) doRequestMetaInfo(
 		addr netip.AddrPort
 		prev string
 		ping string
+		impl string
 	}
 
 	probed := make(chan candidate, len(peers))
 
 	for _, p := range peers {
 		go func() {
-			cand := candidate{addr: p, prev: "new", ping: "ok"}
+			cand := candidate{addr: p, prev: "new", ping: "ok", impl: implSilent}
 			pingSource := "peer_ping" + c.family(p.Addr()).suffix
 
 			if c.deadPeers.test(peerKey(p)) {
@@ -106,6 +136,12 @@ func (c *crawler) doRequestMetaInfo(
 
 			if alive, cached := c.pingCache.get(p); cached {
 				if alive {
+					cand.impl = implRegular
+
+					if c.pingCache.closedHint(p) {
+						cand.impl = implClosedHint
+					}
+
 					c.countHash(pingSource, "cached_ok", 1)
 				} else {
 					cand.ping = "fail"
@@ -121,11 +157,19 @@ func (c *crawler) doRequestMetaInfo(
 			pingCtx, pingCancel := context.WithTimeout(server.WithMaxLimiterWait(ctx, lookupMaxLimiterWait), peerProbeTimeout)
 			defer pingCancel()
 
-			_, pingErr := c.client.Ping(pingCtx, p)
+			pong, pingErr := c.client.Ping(pingCtx, p)
 
 			switch {
 			case pingErr == nil:
-				c.pingCache.put(p, true)
+				cand.impl = implRegular
+				state := pingAlive
+
+				if clientid.ClosedNetworkNode(pong.ClientID) {
+					cand.impl = implClosedHint
+					state = pingAliveClosedHint
+				}
+
+				c.pingCache.putState(p, state)
 				c.countHash(pingSource, "sent_ok", 1)
 			case errors.Is(pingErr, server.ErrLimited):
 				cand.ping = "fail"
@@ -147,8 +191,17 @@ func (c *crawler) doRequestMetaInfo(
 
 	var unanswered []candidate
 
+	regular, hinted := 0, 0
+
 	for range peers {
 		cand := <-probed
+
+		switch cand.impl {
+		case implRegular:
+			regular++
+		case implClosedHint:
+			hinted++
+		}
 
 		switch {
 		case cand.ping == "ok" || dialEveryPeer:
@@ -164,11 +217,35 @@ func (c *crawler) doRequestMetaInfo(
 
 	candidates = append(candidates, unanswered...)
 
+	swarm := "silent"
+
+	switch {
+	case hinted > 0 && regular == 0:
+		swarm = "hint_only"
+	case hinted > 0:
+		swarm = "hint_mixed"
+	case regular > 0:
+		swarm = "regular"
+	}
+
+	countSwarm := func(outcome string) {
+		c.swarmTotal.With(prometheus.Labels{"class": swarm, "outcome": outcome}).Inc()
+	}
+
+	if closedSwarmHintPolicy && swarm == "hint_only" && !c.seeded(hash) {
+		countSwarm("skipped_hint")
+		c.countHash(source, "closed_swarm_dials_skipped", len(candidates))
+
+		return metainforequester.Response{}, errClosedSwarmHint
+	}
+
 	results := make(chan dialResult, len(candidates))
 	next := 0
 	inflight := 0
 
 	var errs []error
+
+	closedPeers := 0
 
 	for {
 		for inflight < metaInfoParallelDials && next < len(candidates) {
@@ -195,7 +272,7 @@ func (c *crawler) doRequestMetaInfo(
 					c.probeTotal.With(prometheus.Labels{"prev": cand.prev, "ping": cand.ping, "dial": outcome}).Inc()
 				}
 
-				results <- dialResult{res: res, err: err, silent: cand.ping != "ok", addr: cand.addr}
+				results <- dialResult{res: res, err: err, silent: cand.ping != "ok", addr: cand.addr, impl: cand.impl}
 			}()
 		}
 
@@ -219,9 +296,19 @@ func (c *crawler) doRequestMetaInfo(
 		}
 
 		c.dialsTotal.With(prometheus.Labels{"source": source, "result": result}).Inc()
+		c.peerDialTotal.With(prometheus.Labels{"node": r.impl, "result": result}).Inc()
 
 		if r.err != nil {
 			errs = append(errs, r.err)
+
+			if errors.Is(r.err, metainforequester.ErrClosedNetworkPeer) {
+				closedPeers++
+
+				if closedSwarmPolicy && next < len(candidates) {
+					c.countHash(source, "closed_swarm_dials_skipped", len(candidates)-next)
+					next = len(candidates)
+				}
+			}
 
 			continue
 		}
@@ -232,6 +319,8 @@ func (c *crawler) doRequestMetaInfo(
 			return metainforequester.Response{}, errors.Join(errBanned, banErr)
 		}
 
+		countSwarm(stageMetaInfoOK)
+
 		if c.family(r.addr.Addr()) == c.v6 {
 			c.countHash(source, stageMetaInfoOK+"6", 1)
 		}
@@ -240,8 +329,18 @@ func (c *crawler) doRequestMetaInfo(
 	}
 
 	if len(errs) == 0 {
+		countSwarm("no_candidates")
+
 		return metainforequester.Response{}, errNoCandidates
 	}
+
+	if closedPeers > 0 {
+		countSwarm("closed_swarm")
+
+		return metainforequester.Response{}, errors.Join(errClosedSwarm, errors.Join(errs...))
+	}
+
+	countSwarm(stageMetaInfoFail)
 
 	return metainforequester.Response{}, errors.Join(errs...)
 }

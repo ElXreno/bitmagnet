@@ -19,7 +19,8 @@ type Client interface {
 }
 
 type PingResult struct {
-	ID protocol.ID
+	ID       protocol.ID
+	ClientID string
 }
 
 type FindNodeResult struct {

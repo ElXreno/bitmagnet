@@ -22,6 +22,8 @@ func TestPeer(t *testing.T) {
 		"A2-1-37-0-abcdefghij": "aria2",
 		"-ZZ0000-abcdefghijkl": Other,
 		"-XF9990-abcdefghijkl": "xfplay",
+		"-XT1000-04d9f58343e2": XT,
+		"-CC1000-c87f546c72f4": CC,
 		"-BN0001-abcdefghijkl": "baidu-netdisk",
 		"-BL246326abcdefghijk": "bitlord",
 		"-SD0100-abcdefghijkl": "xunlei",
@@ -32,6 +34,19 @@ func TestPeer(t *testing.T) {
 		if got := Peer(id(peerID)); got != want {
 			t.Errorf("%q: want %s, got %s", peerID, want, got)
 		}
+	}
+}
+
+func TestClosedNetwork(t *testing.T) {
+	t.Parallel()
+
+	if !ClosedNetwork(Peer(id("-XT1000-04d9f58343e2"))) || !ClosedNetwork(Peer(id("-CC1000-c87f546c72f4"))) ||
+		ClosedNetwork(Peer(id("-qB4650-abcdefghijkl"))) || ClosedNetwork(Other) {
+		t.Fatal("only the XT and CC networks are closed")
+	}
+
+	if !ClosedNetworkNode("LT\x01\x00") || ClosedNetworkNode("LT\x01\x02") || ClosedNetworkNode("") {
+		t.Fatal("only libtorrent 1.0.0 nodes carry the hint")
 	}
 }
 

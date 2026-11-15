@@ -56,6 +56,7 @@ func newTestCrawler(alive map[netip.AddrPort]bool, good map[netip.AddrPort]bool)
 		deadPeers:         &ignoreFilter{bloom: boom.NewStableBloomFilter(1000, 2, 0.001)},
 		pingCache:         newPingCache(time.Minute),
 		hashesTotal:       prometheus.NewCounterVec(prometheus.CounterOpts{Name: "hashes"}, []string{"source", "stage"}),
+		classTotal:        prometheus.NewCounterVec(prometheus.CounterOpts{Name: "class"}, []string{"family", "class", "stage"}),
 		probeTotal:        prometheus.NewCounterVec(prometheus.CounterOpts{Name: "probe"}, []string{"prev", "ping", "dial"}),
 		dialsTotal:        prometheus.NewCounterVec(prometheus.CounterOpts{Name: "dials"}, []string{"source", "result"}),
 	}

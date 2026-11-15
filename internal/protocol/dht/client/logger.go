@@ -63,6 +63,10 @@ func (l clientLogger) SampleInfoHashes(
 	return res, err
 }
 
+func (l clientLogger) IPv6() bool {
+	return l.client.IPv6()
+}
+
 func (l clientLogger) log(query string, addr netip.AddrPort, start time.Time, err error) {
 	if err == nil {
 		l.logger.Debugw(query, "addr", addr, "duration", time.Since(start))

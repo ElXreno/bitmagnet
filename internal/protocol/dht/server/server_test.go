@@ -9,13 +9,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bitmagnet-io/bitmagnet/internal/concurrency"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+	"golang.org/x/time/rate"
 )
 
 type fakeSocket struct {
@@ -247,4 +250,61 @@ func TestDualStackOverLoopback(t *testing.T) {
 		netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), portB),
 		netip.AddrPortFrom(netip.IPv6Loopback(), portB),
 	}, responder.seen())
+}
+
+func familyCounts(t *testing.T, collector prometheus.Collector) map[string]float64 {
+	t.Helper()
+
+	registry := prometheus.NewRegistry()
+	require.NoError(t, registry.Register(collector))
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+
+	counts := make(map[string]float64)
+
+	for _, family := range families {
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == labelFamily {
+					counts[label.GetValue()] += metric.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+
+	return counts
+}
+
+func TestWrappedServerCountsQueriesByFamily(t *testing.T) {
+	t.Parallel()
+
+	collector := newPrometheusCollector()
+	wrapped := queryLimiter{
+		server: prometheusServerWrapper{
+			prometheusCollector: collector,
+			server: healthCollector{
+				baseServer:    newTestServer(newFakeSocket(nil), newFakeSocket(nil), zap.NewNop().Sugar()),
+				lastResponses: &concurrency.AtomicValue[LastResponses]{},
+			},
+		},
+		queryLimiter: concurrency.NewKeyedLimiter(rate.Every(time.Second), 4, 100, time.Second),
+	}
+
+	require.NoError(t, wrapped.start())
+	defer wrapped.stop()
+
+	require.True(t, wrapped.IPv6())
+
+	for _, addr := range []string{"192.0.2.1:6881", "[2001:db8::1]:6881", "[2001:db8::2]:6881"} {
+		_, err := wrapped.Query(context.Background(), netip.MustParseAddrPort(addr), dht.QPing, dht.MsgArgs{})
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	}
+
+	want := map[string]float64{dht.FamilyIPv4: 1, dht.FamilyIPv6: 2}
+	assert.Equal(t, want, familyCounts(t, collector.queryErrorTotal))
+
+	limited := familyCounts(t, limiterWaitTotal)
+	assert.GreaterOrEqual(t, limited[dht.FamilyIPv4], 1.0)
+	assert.GreaterOrEqual(t, limited[dht.FamilyIPv6], 2.0)
 }

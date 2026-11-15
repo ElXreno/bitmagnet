@@ -9,6 +9,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -177,4 +178,39 @@ func TestLimiterCountsAnIPv6Prefix(t *testing.T) {
 	assert.True(t, l.Allow(netip.MustParseAddr("2001:db8:0:2::1")))
 	assert.True(t, l.Allow(netip.MustParseAddr("192.0.2.1")))
 	assert.True(t, l.Allow(netip.MustParseAddr("192.0.2.2")))
+}
+
+func TestResponderMetricsCarryTheFamily(t *testing.T) {
+	t.Parallel()
+
+	f := newDualStackFixture(t, true)
+	collector := newPrometheusCollector(f.responder)
+
+	for _, from := range []netip.AddrPort{f.querier4, f.querier6, f.querier6} {
+		_, err := collector.Respond(context.Background(), dht.RecvMsg{
+			From: from,
+			Msg:  dht.Msg{Q: dht.QPing, A: &dht.MsgArgs{ID: protocol.ID{1}}},
+		})
+		require.NoError(t, err)
+	}
+
+	registry := prometheus.NewRegistry()
+	require.NoError(t, registry.Register(collector.querySuccessTotal))
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+
+	counts := make(map[string]float64)
+
+	for _, family := range families {
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == labelFamily {
+					counts[label.GetValue()] = metric.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+
+	assert.Equal(t, map[string]float64{dht.FamilyIPv4: 1, dht.FamilyIPv6: 2}, counts)
 }

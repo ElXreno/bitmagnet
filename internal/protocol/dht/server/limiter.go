@@ -25,6 +25,10 @@ func (s queryLimiter) stop() {
 	s.server.stop()
 }
 
+func (s queryLimiter) IPv6() bool {
+	return s.server.IPv6()
+}
+
 func (s queryLimiter) Query(
 	ctx context.Context,
 	addr netip.AddrPort,
@@ -42,7 +46,7 @@ func (s queryLimiter) Query(
 	}
 
 	limitErr := s.queryLimiter.Wait(waitCtx, addr.Addr().String())
-	labels := prometheus.Labels{"query": q}
+	labels := prometheus.Labels{labelQuery: q, labelFamily: dht.Family(addr.Addr())}
 
 	limiterWaitSeconds.With(labels).Add(time.Since(started).Seconds())
 	limiterWaitTotal.With(labels).Inc()
@@ -61,21 +65,21 @@ var limiterWaitSeconds = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Subsystem: subsystem,
 	Name:      "limiter_wait_seconds_total",
 	Help:      "Seconds outgoing DHT queries spent waiting in the per-address rate limiter.",
-}, []string{"query"})
+}, labelNames)
 
 var limiterWaitTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: namespace,
 	Subsystem: subsystem,
 	Name:      "limiter_wait_total",
 	Help:      "A counter of outgoing DHT queries that passed through the rate limiter.",
-}, []string{"query"})
+}, labelNames)
 
 var limiterWaitErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: namespace,
 	Subsystem: subsystem,
 	Name:      "limiter_wait_error_total",
 	Help:      "A counter of outgoing DHT queries abandoned while waiting in the rate limiter.",
-}, []string{"query"})
+}, labelNames)
 
 type maxLimiterWaitKey struct{}
 

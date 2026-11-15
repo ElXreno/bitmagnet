@@ -37,6 +37,10 @@ func (c healthCollector) stop() {
 	c.baseServer.stop()
 }
 
+func (c healthCollector) IPv6() bool {
+	return c.baseServer.IPv6()
+}
+
 func (c healthCollector) Query(
 	ctx context.Context,
 	addr netip.AddrPort,

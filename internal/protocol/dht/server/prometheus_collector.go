@@ -16,9 +16,12 @@ type prometheusCollector struct {
 	queryConcurrency  *prometheus.GaugeVec
 }
 
-const labelQuery = "query"
+const (
+	labelQuery  = "query"
+	labelFamily = "family"
+)
 
-var labelNames = []string{labelQuery}
+var labelNames = []string{labelQuery, labelFamily}
 
 func newPrometheusCollector() prometheusCollector {
 	return prometheusCollector{
@@ -63,13 +66,17 @@ func (s prometheusServerWrapper) stop() {
 	s.server.stop()
 }
 
+func (s prometheusServerWrapper) IPv6() bool {
+	return s.server.IPv6()
+}
+
 func (s prometheusServerWrapper) Query(
 	ctx context.Context,
 	addr netip.AddrPort,
 	q string,
 	args dht.MsgArgs,
 ) (dht.RecvMsg, error) {
-	labels := prometheus.Labels{labelQuery: q}
+	labels := prometheus.Labels{labelQuery: q, labelFamily: dht.Family(addr.Addr())}
 	s.queryConcurrency.With(labels).Inc()
 
 	start := time.Now()

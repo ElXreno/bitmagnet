@@ -18,13 +18,18 @@ type Server interface {
 	start() error
 	stop()
 	Query(ctx context.Context, addr netip.AddrPort, q string, args dht.MsgArgs) (dht.RecvMsg, error)
+	IPv6() bool
 }
+
+var ErrNoIPv6 = errors.New("no IPv6 DHT socket")
 
 type server struct {
 	stopped          chan struct{}
 	mutex            sync.Mutex
 	localAddr        netip.AddrPort
 	socket           Socket
+	localAddr6       netip.AddrPort
+	socket6          Socket
 	queryTimeout     time.Duration
 	queries          map[string]chan dht.RecvMsg
 	responder        responder.Responder
@@ -38,13 +43,31 @@ func (s *server) start() error {
 		return fmt.Errorf("could not open socket: %w", err)
 	}
 
+	sockets := []Socket{s.socket}
+
+	if s.socket6 != nil {
+		if err := s.socket6.Open(s.localAddr6); err != nil {
+			s.logger.Warnw("could not open the IPv6 socket, continuing with IPv4 only", "error", err)
+
+			s.socket6 = nil
+		} else {
+			sockets = append(sockets, s.socket6)
+		}
+	}
+
 	go func() {
 		ctx, cancel := context.WithCancel(context.Background())
-		go s.read(ctx)
+
+		for _, socket := range sockets {
+			go s.read(ctx, socket)
+		}
+
 		<-s.stopped
 		cancel()
 
-		_ = s.socket.Close()
+		for _, socket := range sockets {
+			_ = socket.Close()
+		}
 	}()
 
 	return nil
@@ -54,7 +77,11 @@ func (s *server) stop() {
 	close(s.stopped)
 }
 
-func (s *server) read(ctx context.Context) {
+func (s *server) IPv6() bool {
+	return s.socket6 != nil
+}
+
+func (s *server) read(ctx context.Context, socket Socket) {
 	/*   The field size sets a theoretical limit of 65,535 bytes (8 byte header + 65,527 bytes of
 	 * data) for a UDP datagram. However the actual limit for the data length, which is imposed by
 	 * the underlying IPv4 protocol, is 65,507 bytes (65,535 − 8 byte UDP header − 20 byte IP
@@ -73,7 +100,7 @@ func (s *server) read(ctx context.Context) {
 			return
 		}
 
-		n, from, err := s.socket.Receive(buffer)
+		n, from, err := socket.Receive(buffer)
 		if err != nil {
 			// Socket is probably closed; if we're not shutting down then panic
 			if ctx.Err() == nil {
@@ -220,10 +247,28 @@ func (s *server) send(addr netip.AddrPort, msg dht.Msg) error {
 		return encodeErr
 	}
 
-	sendErr := s.socket.Send(addr, data)
+	socket, addr, socketErr := s.socketFor(addr)
+	if socketErr != nil {
+		return socketErr
+	}
+
+	sendErr := socket.Send(addr, data)
 	if sendErr != nil {
 		return sendErr
 	}
 
 	return nil
+}
+
+func (s *server) socketFor(addr netip.AddrPort) (Socket, netip.AddrPort, error) {
+	addr = netip.AddrPortFrom(addr.Addr().Unmap(), addr.Port())
+	if !addr.Addr().Is6() {
+		return s.socket, addr, nil
+	}
+
+	if s.socket6 == nil {
+		return nil, addr, ErrNoIPv6
+	}
+
+	return s.socket6, addr, nil
 }

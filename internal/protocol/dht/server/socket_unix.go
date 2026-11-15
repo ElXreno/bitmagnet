@@ -11,14 +11,7 @@ import (
 )
 
 func newSocket() Socket {
-	fd, sockErr := unix.Socket(unix.SOCK_DGRAM, unix.AF_INET, 0)
-	if sockErr != nil {
-		panic(fmt.Errorf("error creating socket: %w", sockErr))
-	}
-
-	return &socket{
-		fd: fd,
-	}
+	return &socket{fd: -1}
 }
 
 type socket struct {
@@ -31,10 +24,40 @@ func (s *socket) Open(localAddr netip.AddrPort) error {
 		return addrErr
 	}
 
-	return unix.Bind(s.fd, sAddr)
+	family := unix.AF_INET
+	if localAddr.Addr().Is6() {
+		family = unix.AF_INET6
+	}
+
+	fd, sockErr := unix.Socket(family, unix.SOCK_DGRAM, 0)
+	if sockErr != nil {
+		return fmt.Errorf("error creating socket: %w", sockErr)
+	}
+
+	if family == unix.AF_INET6 {
+		if optErr := unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 1); optErr != nil {
+			_ = unix.Close(fd)
+
+			return fmt.Errorf("error setting IPV6_V6ONLY: %w", optErr)
+		}
+	}
+
+	if bindErr := unix.Bind(fd, sAddr); bindErr != nil {
+		_ = unix.Close(fd)
+
+		return bindErr
+	}
+
+	s.fd = fd
+
+	return nil
 }
 
 func (s *socket) Close() error {
+	if s.fd < 0 {
+		return nil
+	}
+
 	return unix.Close(s.fd)
 }
 

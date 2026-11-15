@@ -2,6 +2,7 @@ package dhtcrawler
 
 import (
 	"container/heap"
+	"container/list"
 	"context"
 	"errors"
 	"expvar"
@@ -29,6 +30,7 @@ const (
 	stageInboundFetchedOut    = "fetched_outgoing"
 	stageInboundUnknownHash   = "unknown_hash"
 	stageInboundActiveConn    = "active_conn"
+	stageInboundLateConn      = "late_conn"
 	stageInboundHandshake     = "handshake_failed"
 	stageInboundNoMetaInfo    = "peer_no_metainfo"
 	stageInboundFetchFailed   = "fetch_failed"
@@ -42,6 +44,8 @@ type inboundConfig struct {
 	maxHashes int
 	hold      time.Duration
 	maxConns  int
+	lateMax   int
+	lateTTL   time.Duration
 	dht       bool
 }
 
@@ -57,6 +61,8 @@ func inboundConfigFromEnv() (inboundConfig, bool) {
 		maxHashes: envInt("BITMAGNET_INBOUND_MAX_HASHES", 2*announcesPerSecond*holdSeconds),
 		hold:      time.Duration(holdSeconds) * time.Second,
 		maxConns:  envInt("BITMAGNET_INBOUND_MAX_CONNS", 500),
+		lateMax:   envInt("BITMAGNET_INBOUND_LATE_HASHES", 50_000),
+		lateTTL:   time.Duration(envInt("BITMAGNET_INBOUND_LATE_SECONDS", 900)) * time.Second,
 		dht:       os.Getenv("BITMAGNET_INBOUND_DHT") == "on",
 	}, true
 }
@@ -68,10 +74,13 @@ type inboundEntry struct {
 	seq       uint64
 	since     time.Time
 	deadline  time.Time
+	until     time.Time
+	elem      *list.Element
 	active    int
 	index     int
 	announced bool
 	failed    bool
+	late      bool
 	done      bool
 }
 
@@ -120,6 +129,8 @@ type inboundPeers struct {
 	mu         sync.Mutex
 	entries    map[protocol.ID]*inboundEntry
 	weakest    inboundHeap
+	late       map[protocol.ID]*inboundEntry
+	lateOrder  *list.List
 	seq        uint64
 }
 
@@ -168,6 +179,8 @@ func (c *crawler) openInboundPeers(config inboundConfig, receiver metainforeques
 		slots:     make(chan struct{}, config.maxConns),
 		now:       time.Now,
 		entries:   make(map[protocol.ID]*inboundEntry),
+		late:      make(map[protocol.ID]*inboundEntry),
+		lateOrder: list.New(),
 	}
 
 	stops := max(config.maxHashes, trackerAnnounceQueue)
@@ -370,6 +383,10 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 		return stageAlreadyFetched
 	}
 
+	if kind == stageInboundLateConn {
+		c.countHash(sourceInboundPeer, stageMetaInfoOK+"_late", 1)
+	}
+
 	c.countHash(sourceInboundPeer, stageMetaInfoOK, 1)
 	c.countHash(sourceInboundPeer, stageMetaInfoOK+trackerSource(entry.seeders), 1)
 	c.countHash(sourceInboundPeer, stageMetaInfoOK+"_wait_seconds", int(p.now().Sub(entry.since).Seconds()))
@@ -427,6 +444,10 @@ func (p *inboundPeers) join(s *trackerScraper, index int, hash protocol.ID, seed
 			p.c.countHash(sourceInboundPeer, stageInboundReplaced, 1)
 		}
 
+		if late, ok := p.late[hash]; ok {
+			p.removeLate(late)
+		}
+
 		p.seq++
 
 		entry := &inboundEntry{
@@ -449,8 +470,7 @@ func (p *inboundPeers) join(s *trackerScraper, index int, hash protocol.ID, seed
 	return joinMember
 }
 
-// retire keeps the hash wanted, forget does not; both need mu
-func (p *inboundPeers) retire(entry *inboundEntry) {
+func (p *inboundPeers) leave(entry *inboundEntry) {
 	delete(p.entries, entry.hash)
 	heap.Remove(&p.weakest, entry.index)
 
@@ -459,14 +479,51 @@ func (p *inboundPeers) retire(entry *inboundEntry) {
 	}
 }
 
-func (p *inboundPeers) forget(hash protocol.ID) bool {
-	entry, ok := p.entries[hash]
-	if ok {
-		entry.done = true
-		p.retire(entry)
+// retire keeps the hash for late arrivals, forget drops it for good; both need mu
+func (p *inboundPeers) retire(entry *inboundEntry) {
+	p.leave(entry)
+
+	if p.config.lateMax <= 0 {
+		return
 	}
 
-	return ok
+	evicted := 0
+
+	for len(p.late) >= p.config.lateMax {
+		p.removeLate(p.lateOrder.Front().Value.(*inboundEntry))
+
+		evicted++
+	}
+
+	p.c.countHash(sourceInboundPeer, "late_evicted", evicted)
+
+	entry.late = true
+	entry.until = p.now().Add(p.config.lateTTL)
+	entry.elem = p.lateOrder.PushBack(entry)
+	p.late[entry.hash] = entry
+}
+
+func (p *inboundPeers) removeLate(entry *inboundEntry) {
+	delete(p.late, entry.hash)
+	p.lateOrder.Remove(entry.elem)
+}
+
+func (p *inboundPeers) forget(hash protocol.ID) string {
+	if entry, ok := p.entries[hash]; ok {
+		entry.done = true
+		p.leave(entry)
+
+		return "active"
+	}
+
+	if entry, ok := p.late[hash]; ok {
+		entry.done = true
+		p.removeLate(entry)
+
+		return "late"
+	}
+
+	return ""
 }
 
 func (p *inboundPeers) announced(hash protocol.ID) {
@@ -499,9 +556,23 @@ func (p *inboundPeers) expire() {
 		}
 	}
 
+	lateExpired := 0
+
+	for front := p.lateOrder.Front(); front != nil; front = p.lateOrder.Front() {
+		entry := front.Value.(*inboundEntry)
+		if now.Before(entry.until) {
+			break
+		}
+
+		p.removeLate(entry)
+
+		lateExpired++
+	}
+
 	p.mu.Unlock()
 
 	p.c.countHash(sourceInboundPeer, stageInboundExpired, expired)
+	p.c.countHash(sourceInboundPeer, "late_expired", lateExpired)
 }
 
 func (p *inboundPeers) fetchedOutgoing(hash protocol.ID) {
@@ -514,11 +585,14 @@ func (p *inboundPeers) release(hash protocol.ID, stage string) {
 	}
 
 	p.mu.Lock()
-	held := p.forget(hash)
+	kind := p.forget(hash)
 	p.mu.Unlock()
 
-	if held {
+	switch kind {
+	case "active":
 		p.c.countHash(sourceInboundPeer, stage, 1)
+	case "late":
+		p.c.countHash(sourceInboundPeer, "late_"+stage, 1)
 	}
 }
 
@@ -528,7 +602,12 @@ func (p *inboundPeers) outgoingFailed(req nodeHasPeersForHash) {
 	}
 
 	p.mu.Lock()
+
 	entry, ok := p.entries[req.infoHash]
+	if !ok {
+		entry, ok = p.late[req.infoHash]
+	}
+
 	first := ok && !entry.failed
 
 	if ok {
@@ -569,11 +648,23 @@ func (p *inboundPeers) hashes() []protocol.ID {
 	return hashes
 }
 
-func (p *inboundPeers) claim(hash protocol.ID, _ bool) (*inboundEntry, string) {
+func (p *inboundPeers) claim(hash protocol.ID, encrypted bool) (*inboundEntry, string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	kind := stageInboundActiveConn
+
 	entry, ok := p.entries[hash]
+	if !ok && !encrypted {
+		kind = stageInboundLateConn
+		entry, ok = p.late[hash]
+
+		if ok && p.c.fetched.test(hash) {
+			p.removeLate(entry)
+
+			ok = false
+		}
+	}
 
 	switch {
 	case !ok:
@@ -584,7 +675,7 @@ func (p *inboundPeers) claim(hash protocol.ID, _ bool) (*inboundEntry, string) {
 
 	entry.active++
 
-	return entry, stageInboundActiveConn
+	return entry, kind
 }
 
 func (p *inboundPeers) unclaim(entry *inboundEntry) {
@@ -612,4 +703,11 @@ func (p *inboundPeers) size() int {
 	defer p.mu.Unlock()
 
 	return len(p.entries)
+}
+
+func (p *inboundPeers) lateSize() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return len(p.late)
 }

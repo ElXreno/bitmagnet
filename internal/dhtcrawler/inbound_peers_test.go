@@ -580,6 +580,97 @@ func TestInboundFetchReachesPersistence(t *testing.T) {
 	}
 }
 
+func TestInboundLateArrivals(t *testing.T) {
+	t.Parallel()
+
+	config := inboundConfig{maxHashes: 1, hold: time.Minute, maxConns: 4, lateMax: 2, lateTTL: 10 * time.Minute}
+	i := newInboundTest(t, config, offlineScraper(1))
+	metadata, hash := inboundMetadata(t, "late")
+	stronger, third, fourth := protocol.ID{1}, protocol.ID{2}, protocol.ID{3}
+
+	i.join(hash, 5)
+	i.inbound.outgoingFailed(sampleRequest(hash))
+	i.join(stronger, 9)
+
+	if got := i.registered(); len(got) != 1 || !got[stronger] || i.inbound.lateSize() != 1 {
+		t.Fatalf("want the replaced hash kept for late arrivals, got %v and %d late", got, i.inbound.lateSize())
+	}
+
+	i.clock.Add(int64(9 * time.Minute))
+	i.inbound.expire()
+
+	if len(i.registered()) != 0 || i.inbound.lateSize() != 2 {
+		t.Fatalf("want the expired hash kept for late arrivals too, got %d late", i.inbound.lateSize())
+	}
+
+	if _, err := (peertest.Peer{InfoHash: hash, Metadata: metadata, Encrypted: true}).Dial(i.address()); err == nil {
+		t.Fatal("a late hash must not be an MSE key")
+	}
+
+	if _, err := (peertest.Peer{InfoHash: hash, Metadata: metadata}).Dial(i.address()); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := i.persisted(t); got.infoHash != hash || got.metaInfo.Name != "late" || got.origin != sourceSample {
+		t.Fatalf("persisted %+v", got.nodeHasPeersForHash)
+	}
+
+	if !i.fetched.test(hash) || i.inbound.lateSize() != 1 {
+		t.Fatalf("the late hash must be gone after its fetch, %d late", i.inbound.lateSize())
+	}
+
+	i.fetched.add(stronger)
+
+	if _, err := (peertest.Peer{InfoHash: stronger, Metadata: metadata}).Dial(i.address()); err == nil {
+		t.Fatal("a late hash fetched meanwhile was answered")
+	}
+
+	eventually(t, "late counters", func() bool {
+		return hashCount(t, i.crawler, sourceInboundPeer, stageInboundUnknownHash) == 2 && i.inbound.lateSize() == 0
+	})
+
+	for _, late := range []protocol.ID{third, fourth, {4}} {
+		i.join(late, 5)
+		i.clock.Add(int64(time.Minute))
+		i.inbound.expire()
+	}
+
+	if i.inbound.lateSize() != 2 {
+		t.Fatalf("the late set must stay within its bound, %d late", i.inbound.lateSize())
+	}
+
+	i.inbound.fetchedOutgoing(fourth)
+
+	if i.join(protocol.ID{4}, 5) != joinMember || i.inbound.lateSize() != 0 {
+		t.Fatalf("a late hash fetched by the outgoing path or held again must leave the late set")
+	}
+
+	i.clock.Add(int64(time.Minute))
+	i.inbound.expire()
+	i.clock.Add(int64(10 * time.Minute))
+	i.inbound.expire()
+
+	if i.inbound.lateSize() != 0 {
+		t.Fatal("a late hash outlived its time")
+	}
+
+	for stage, want := range map[string]float64{
+		stageInboundLateConn:             1,
+		stageInboundActiveConn:           0,
+		stageMetaInfoOK:                  1,
+		stageMetaInfoOK + "_late":        1,
+		stageInboundReplaced:             1,
+		stageInboundExpired:              5,
+		"late_evicted":                   1,
+		"late_expired":                   1,
+		"late_" + stageInboundFetchedOut: 1,
+	} {
+		if got := hashCount(t, i.crawler, sourceInboundPeer, stage); got != want {
+			t.Errorf("stage %s: want %v, got %v", stage, want, got)
+		}
+	}
+}
+
 func TestInboundRefusesWhatItCannotUse(t *testing.T) {
 	t.Parallel()
 
@@ -985,6 +1076,8 @@ func TestInboundSwitchAndTrackerMembership(t *testing.T) {
 	t.Setenv("BITMAGNET_TRACKER_ANNOUNCE_PPS", "")
 	t.Setenv("BITMAGNET_INBOUND_MAX_HASHES", "")
 	t.Setenv("BITMAGNET_INBOUND_DHT", "")
+	t.Setenv("BITMAGNET_INBOUND_LATE_HASHES", "")
+	t.Setenv("BITMAGNET_INBOUND_LATE_SECONDS", "")
 
 	receiver := metainforequester.NewReceiver(protocol.RandomPeerID(), 2*time.Second)
 	metadata, hash := inboundMetadata(t, "held")
@@ -1100,7 +1193,9 @@ func TestInboundSwitchAndTrackerMembership(t *testing.T) {
 		t.Fatal("BITMAGNET_INBOUND_PEERS=on must start the listener")
 	}
 
-	if got := c.inbound.config; got != (inboundConfig{maxHashes: 60, hold: time.Second, maxConns: 3}) {
+	if got := c.inbound.config; got != (inboundConfig{
+		maxHashes: 60, hold: time.Second, maxConns: 3, lateMax: 50_000, lateTTL: 15 * time.Minute,
+	}) {
 		t.Fatalf("want room for two trackers announcing 30 hashes a second for the hold of one second, got %+v", got)
 	}
 

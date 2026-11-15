@@ -90,7 +90,7 @@ func receiveWith(t *testing.T, receiver Receiver, peer peertest.Peer, keys []pro
 
 	var result received
 
-	result.in, result.err = receiver.Accept(conn, func() []protocol.ID { return keys })
+	result.in, result.err = receiver.Accept(conn, KeysLookup(func() []protocol.ID { return keys }))
 	if result.err == nil {
 		result.res, result.err = result.in.Fetch()
 	}
@@ -277,7 +277,7 @@ func acceptRaw(t *testing.T, receiver Receiver, sent string, closeAfter bool) (*
 
 	defer conn.Close()
 
-	return receiver.Accept(conn, func() []protocol.ID { return nil })
+	return receiver.Accept(conn, KeysLookup(func() []protocol.ID { return nil }))
 }
 
 func TestBencodeUnsafe(t *testing.T) {
@@ -476,7 +476,7 @@ func BenchmarkAcceptUnknownMSE(b *testing.B) {
 					_ = client.Close()
 				}()
 
-				_, err := receiver.Accept(server, func() []protocol.ID { return keys })
+				_, err := receiver.Accept(server, KeysLookup(func() []protocol.ID { return keys }))
 				_ = server.Close()
 
 				if !errors.Is(err, ErrUnknownInfoHash) {

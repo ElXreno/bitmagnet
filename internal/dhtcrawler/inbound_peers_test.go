@@ -201,8 +201,11 @@ func (i inboundTest) address() string {
 }
 
 func (i inboundTest) registered() map[protocol.ID]bool {
+	i.inbound.mu.Lock()
+	defer i.inbound.mu.Unlock()
+
 	hashes := make(map[protocol.ID]bool)
-	for _, hash := range i.inbound.hashes() {
+	for hash := range i.inbound.entries {
 		hashes[hash] = true
 	}
 
@@ -618,12 +621,8 @@ func TestInboundLateArrivals(t *testing.T) {
 		t.Fatalf("want the expired hash kept for late arrivals too, got %d late", i.inbound.lateSize())
 	}
 
-	if _, err := (peertest.Peer{InfoHash: hash, Metadata: metadata, Encrypted: true}).Dial(i.address()); err == nil {
-		t.Fatal("a late hash must not be an MSE key")
-	}
-
-	if _, err := (peertest.Peer{InfoHash: hash, Metadata: metadata}).Dial(i.address()); err != nil {
-		t.Fatal(err)
+	if _, err := (peertest.Peer{InfoHash: hash, Metadata: metadata, Encrypted: true}).Dial(i.address()); err != nil {
+		t.Fatalf("a late hash is served over MSE too: %v", err)
 	}
 
 	if got := i.persisted(t); got.infoHash != hash || got.metaInfo.Name != "late" || got.origin != sourceSample {
@@ -641,7 +640,7 @@ func TestInboundLateArrivals(t *testing.T) {
 	}
 
 	eventually(t, "late counters", func() bool {
-		return hashCount(t, i.crawler, sourceInboundPeer, stageInboundUnknownHash) == 2 && i.inbound.lateSize() == 0
+		return hashCount(t, i.crawler, sourceInboundPeer, stageInboundUnknownHash) == 1 && i.inbound.lateSize() == 0
 	})
 
 	for _, late := range []protocol.ID{third, fourth, {4}} {
@@ -1847,14 +1846,10 @@ func TestDHTJoinForSwarmsWithoutTrackers(t *testing.T) {
 		}
 	}
 
-	if _, err := (peertest.Peer{InfoHash: hash, Metadata: metadata, Encrypted: true}).Dial(i.address()); err == nil {
-		t.Fatal("a DHT-held hash must not be an MSE key")
-	}
-
 	i.clock.Add(int64(100 * time.Second))
 
-	if _, err := (peertest.Peer{InfoHash: hash, Metadata: metadata}).Dial(i.address()); err != nil {
-		t.Fatal(err)
+	if _, err := (peertest.Peer{InfoHash: hash, Metadata: metadata, Encrypted: true}).Dial(i.address()); err != nil {
+		t.Fatalf("a DHT-held hash is served over MSE too: %v", err)
 	}
 
 	if got := i.persisted(t); got.infoHash != hash || got.source != sourceInboundPeer || got.origin != sourceSample {
@@ -1868,7 +1863,7 @@ func TestDHTJoinForSwarmsWithoutTrackers(t *testing.T) {
 		stageMetaInfoOK + "_dht":              1,
 		stageMetaInfoOK + "_dht_wait_seconds": 100,
 		stageMetaInfoOK + "_wait_seconds":     0,
-		stageInboundUnknownHash:               1,
+		stageInboundUnknownHash:               0,
 	} {
 		if got := count(stage); got != want {
 			t.Errorf("stage %s: want %v, got %v", stage, want, got)

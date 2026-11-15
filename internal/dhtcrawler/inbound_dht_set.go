@@ -58,6 +58,7 @@ func (h *dhtHeld) request() nodeHasPeersForHash {
 
 // dhtHeldSet is a ring in arrival order with an index: O(1), oldest out first
 type dhtHeldSet struct {
+	onAdd func(protocol.ID)
 	slots []dhtHeld
 	head  int
 	used  int
@@ -122,6 +123,10 @@ func (s *dhtHeldSet) add(held dhtHeld) (added bool, evicted bool) {
 	s.slots[slot] = held
 	s.index[held.hash] = uint32(slot)
 	s.used++
+
+	if s.onAdd != nil {
+		s.onAdd(held.hash)
+	}
 
 	return true, evicted
 }

@@ -39,6 +39,7 @@ func (p *inboundPeers) enableDHT(v4 net.Listener, v6 net.Listener) {
 	}
 
 	p.dhtSet = newDHTHeldSet(p.config.dhtMax, p.config.dhtTTL)
+	p.dhtSet.onAdd = p.indexMSE
 	p.dhtJoins = make(chan nodeHasPeersForHash, 10*p.config.dhtPPS)
 	p.dhtLimiter = rate.NewLimiter(rate.Limit(p.config.dhtPPS), p.config.dhtPPS)
 	p.dhtLookups = make(chan struct{}, inboundDHTLookups)

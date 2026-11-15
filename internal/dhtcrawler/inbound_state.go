@@ -116,6 +116,7 @@ func (p *inboundPeers) loadState() {
 		entry.req.node, _ = netip.ParseAddrPort(saved[i].Node)
 		entry.elem = p.lateOrder.PushBack(entry)
 		p.late[entry.hash] = entry
+		p.indexMSE(entry.hash)
 		loaded++
 	}
 

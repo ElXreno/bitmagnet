@@ -2,7 +2,6 @@ package metainforequester
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -13,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/anacrolix/torrent/mse"
 	"github.com/anacrolix/torrent/peer_protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/clientid"
@@ -90,7 +88,7 @@ type readWriter struct {
 	io.Writer
 }
 
-func (r Receiver) Accept(conn net.Conn, keys func() []protocol.ID) (*Incoming, error) {
+func (r Receiver) Accept(conn net.Conn, lookup MSELookup) (*Incoming, error) {
 	if err := conn.SetDeadline(time.Now().Add(r.timeout)); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrIncomingHandshake, err)
 	}
@@ -106,31 +104,23 @@ func (r Receiver) Accept(conn net.Conn, keys func() []protocol.ID) (*Incoming, e
 	in := &Incoming{receiver: r, rw: conn}
 	rest := head[protocolLen:]
 
+	var encryptedFor *protocol.ID
+
 	if string(head[:protocolLen]) != peer_protocol.Protocol {
 		replayed := readWriter{io.MultiReader(bytes.NewReader(head[:protocolLen]), conn), conn}
 
-		decrypted, _, err := mse.ReceiveHandshake(
-			context.Background(),
-			replayed,
-			func(yield func([]byte) bool) {
-				for _, key := range keys() {
-					if !yield(key[:]) {
-						return
-					}
-				}
-			},
-			mse.DefaultCryptoSelector,
-		)
-		if errors.Is(err, mse.ErrNoSecretKeyMatch) {
-			return nil, ErrUnknownInfoHash
+		decrypted, keyed, err := mseReceive(replayed, lookup)
+		if errors.Is(err, ErrUnknownInfoHash) {
+			return nil, err
 		}
 
 		if err != nil {
-			return nil, fmt.Errorf("%w: mse: %w", ErrIncomingHandshake, err)
+			return nil, fmt.Errorf("%w: %w", ErrIncomingHandshake, err)
 		}
 
 		in.rw = decrypted
 		in.Encrypted = true
+		encryptedFor = &keyed
 		rest = head[:]
 	}
 
@@ -144,6 +134,10 @@ func (r Receiver) Accept(conn net.Conn, keys func() []protocol.ID) (*Incoming, e
 
 	copy(in.bits[:], head[protocolLen:protocolLen+8])
 	copy(in.InfoHash[:], head[protocolLen+8:])
+
+	if encryptedFor != nil && *encryptedFor != in.InfoHash {
+		return nil, fmt.Errorf("%w: handshake for another info hash than its encryption", ErrIncomingHandshake)
+	}
 
 	if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
 		in.addr = tcpAddr.AddrPort()

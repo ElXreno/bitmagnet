@@ -17,6 +17,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
+	lru "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
@@ -163,6 +164,7 @@ type inboundPeers struct {
 	weakest    inboundHeap
 	late       map[protocol.ID]*inboundEntry
 	lateOrder  *list.List
+	mseIndex   *lru.LRU[metainforequester.MSEKey, protocol.ID]
 	seq        uint64
 	closing    bool
 }
@@ -215,6 +217,11 @@ func (c *crawler) openInboundPeers(config inboundConfig, receiver metainforeques
 		entries:   make(map[protocol.ID]*inboundEntry),
 		late:      make(map[protocol.ID]*inboundEntry),
 		lateOrder: list.New(),
+		mseIndex: lru.NewLRU[metainforequester.MSEKey, protocol.ID](
+			config.maxHashes+config.lateMax+config.dhtMax,
+			nil,
+			max(config.hold+config.lateTTL, config.dhtTTL)+time.Minute,
+		),
 	}
 
 	stops := max(config.maxHashes, trackerAnnounceQueue)
@@ -419,7 +426,7 @@ func inboundHandshakeResult(err error) string {
 func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 	c := p.c
 
-	in, err := p.receiver.Accept(conn, p.hashes)
+	in, err := p.receiver.Accept(conn, p.lookupMSE)
 
 	switch {
 	case errors.Is(err, metainforequester.ErrUnknownInfoHash):
@@ -579,6 +586,7 @@ func (p *inboundPeers) join(s *trackerScraper, index int, hash protocol.ID, seed
 		}
 
 		p.entries[hash] = entry
+		p.indexMSE(hash)
 		heap.Push(&p.weakest, entry)
 		p.c.countHash(sourceInboundPeer, stageInboundRegistered, 1)
 		p.c.countHash(sourceInboundPeer, stageInboundRegistered+trackerSource(seeders), 1)
@@ -849,16 +857,12 @@ func (p *inboundPeers) origin(entry *inboundEntry) nodeHasPeersForHash {
 	return entry.req
 }
 
-func (p *inboundPeers) hashes() []protocol.ID {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func (p *inboundPeers) indexMSE(hash protocol.ID) {
+	p.mseIndex.Add(metainforequester.MSEKeyOf(hash), hash)
+}
 
-	hashes := make([]protocol.ID, len(p.weakest))
-	for i, entry := range p.weakest {
-		hashes[i] = entry.hash
-	}
-
-	return hashes
+func (p *inboundPeers) lookupMSE(key metainforequester.MSEKey) (protocol.ID, bool) {
+	return p.mseIndex.Get(key)
 }
 
 func (p *inboundPeers) claim(hash protocol.ID, encrypted bool) (*inboundEntry, string) {
@@ -868,7 +872,7 @@ func (p *inboundPeers) claim(hash protocol.ID, encrypted bool) (*inboundEntry, s
 	kind := stageInboundActiveConn
 
 	entry, ok := p.entries[hash]
-	if !ok && !encrypted {
+	if !ok {
 		kind = stageInboundLateConn
 		entry, ok = p.late[hash]
 
@@ -879,7 +883,7 @@ func (p *inboundPeers) claim(hash protocol.ID, encrypted bool) (*inboundEntry, s
 		}
 	}
 
-	if held := p.dhtSet.get(hash); !ok && !encrypted && held != nil {
+	if held := p.dhtSet.get(hash); !ok && held != nil {
 		switch {
 		case p.c.fetched.test(hash):
 			p.dhtSet.remove(hash)

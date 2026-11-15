@@ -122,8 +122,8 @@ func New(params Params) Result {
 						nodesForFindNode: concurrency.NewBufferedConcurrentChannel[ktable.Node](
 							10*scalingFactor, 10*scalingFactor),
 						nodesForSampleInfoHashes: concurrency.NewBufferedConcurrentChannel[ktable.Node](
-							10*scalingFactor,
-							10*scalingFactor,
+							40*scalingFactor,
+							40*scalingFactor,
 						),
 						infoHashTriage: concurrency.NewBatchingChannel[nodeHasPeersForHash](
 							10*scalingFactor, 1000, 20*time.Second),

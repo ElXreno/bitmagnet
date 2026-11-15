@@ -50,7 +50,7 @@ func New(p Params) Result {
 					return zapcore.NewSamplerWithOptions(core, time.Minute, 10, 0)
 				})).Named("meta_info_requester"),
 			},
-			limiter: concurrency.NewKeyedLimiter(rate.Every(time.Second/2), 4, 1000, time.Second*20),
+			limiter: concurrency.NewKeyedLimiter(rate.Every(time.Second/8), 8, 100_000, time.Second*20),
 		},
 		RequestDuration:     collector.requestDuration,
 		RequestSuccessTotal: collector.requestSuccessTotal,

@@ -8,6 +8,7 @@ import (
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
 )
 
 const (
@@ -121,6 +122,11 @@ func (c *crawler) lookupPeers(
 
 			for _, n := range r.res.Nodes {
 				add(n.ID, n.Addr)
+
+				select {
+				case c.discoveredNodes.In() <- ktable.NewNode(n.ID, n.Addr):
+				default:
+				}
 			}
 		}
 

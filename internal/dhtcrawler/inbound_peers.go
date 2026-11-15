@@ -280,6 +280,8 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 
 	res, err := in.Fetch()
 
+	_ = conn.Close()
+
 	switch {
 	case errors.Is(err, metainforequester.ErrClosedNetworkPeer):
 		c.countHash(sourceInboundPeer, stageInboundClosedNetwork, 1)
@@ -312,13 +314,14 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 		return stageBanned
 	}
 
+	c.fetched.add(in.InfoHash)
+
 	if !p.take(entry) {
 		c.countHash(sourceInboundPeer, stageAlreadyFetched, 1)
 
 		return stageAlreadyFetched
 	}
 
-	c.fetched.add(in.InfoHash)
 	c.countHash(sourceInboundPeer, stageMetaInfoOK, 1)
 	c.countHash(sourceInboundPeer, stageMetaInfoOK+trackerSource(entry.seeders), 1)
 	c.countHash(sourceInboundPeer, stageMetaInfoOK+"_wait_seconds", int(p.now().Sub(entry.since).Seconds()))
@@ -352,12 +355,16 @@ func (p *inboundPeers) register(req nodeHasPeersForHash) {
 		return
 	}
 
+	if !p.c.seeded(req.infoHash) || p.c.fetched.test(req.infoHash) {
+		return
+	}
+
 	seeders := uint32(0)
 	for _, scraper := range p.trackers {
 		seeders = max(seeders, scraper.holdableSeeders(req.infoHash))
 	}
 
-	if seeders == 0 || p.c.fetched.test(req.infoHash) {
+	if seeders == 0 {
 		return
 	}
 

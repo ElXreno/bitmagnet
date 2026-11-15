@@ -817,9 +817,10 @@ type heldAnnounce struct {
 	hash  protocol.ID
 	left  uint64
 	port  uint16
+	at    time.Time
 }
 
-func fakeHoldTracker(t *testing.T) (string, chan heldAnnounce) {
+func fakeHoldTracker(t *testing.T) (string, chan heldAnnounce, *atomic.Int64) {
 	t.Helper()
 
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -830,6 +831,7 @@ func fakeHoldTracker(t *testing.T) (string, chan heldAnnounce) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	announces := make(chan heldAnnounce, 64)
+	startedDelay := &atomic.Int64{}
 
 	go func() {
 		buffer := make([]byte, 2048)
@@ -864,6 +866,7 @@ func fakeHoldTracker(t *testing.T) (string, chan heldAnnounce) {
 					hash:  protocol.ID(packet[16:36]),
 					left:  binary.BigEndian.Uint64(packet[64:72]),
 					port:  binary.BigEndian.Uint16(packet[96:98]),
+					at:    time.Now(),
 				}
 				announces <- seen
 
@@ -873,6 +876,16 @@ func fakeHoldTracker(t *testing.T) (string, chan heldAnnounce) {
 
 				binary.BigEndian.PutUint32(response[0:4], 1)
 				response = append(response, make([]byte, 12)...)
+
+				if delay := time.Duration(startedDelay.Load()); delay > 0 {
+					go func() {
+						time.Sleep(delay)
+
+						_, _ = conn.WriteToUDP(response, from)
+					}()
+
+					continue
+				}
 			default:
 				continue
 			}
@@ -881,7 +894,7 @@ func fakeHoldTracker(t *testing.T) (string, chan heldAnnounce) {
 		}
 	}()
 
-	return conn.LocalAddr().String(), announces
+	return conn.LocalAddr().String(), announces, startedDelay
 }
 
 func nextAnnounce(t *testing.T, announces chan heldAnnounce) heldAnnounce {
@@ -898,7 +911,7 @@ func nextAnnounce(t *testing.T, announces chan heldAnnounce) heldAnnounce {
 }
 
 func TestInboundSwitchAndTrackerHold(t *testing.T) {
-	address, announces := fakeHoldTracker(t)
+	address, announces, startedDelay := fakeHoldTracker(t)
 
 	t.Setenv("BITMAGNET_TRACKERS", address)
 	t.Setenv("BITMAGNET_TRACKER_ANNOUNCE", "")
@@ -982,20 +995,21 @@ func TestInboundSwitchAndTrackerHold(t *testing.T) {
 	scrapeAndAnnounce(c, hash)
 	scrapeAndAnnounce(c, hash2)
 
+	registeredAt := time.Now()
+
 	c.inbound.register(nodeHasPeersForHash{infoHash: hash2, source: sourceSample})
 
 	if seen := nextAnnounce(t, announces); seen.event != 2 || seen.hash != hash2 || seen.port != port || seen.left == 0 {
 		t.Fatalf("want a started announce as a leecher on the listener port %d, got %+v", port, seen)
 	}
 
-	select {
-	case seen := <-announces:
-		t.Fatalf("the swarm was left %+v before the hold ended", seen)
-	case <-time.After(500 * time.Millisecond):
+	seen := nextAnnounce(t, announces)
+	if seen.event != 3 || seen.hash != hash2 || seen.port != port {
+		t.Fatalf("want a stopped announce when the hold expires, got %+v", seen)
 	}
 
-	if seen := nextAnnounce(t, announces); seen.event != 3 || seen.hash != hash2 || seen.port != port {
-		t.Fatalf("want a stopped announce when the hold expires, got %+v", seen)
+	if held := seen.at.Sub(registeredAt); held < time.Second {
+		t.Fatalf("the swarm was left after %s, before the hold of one second ended", held)
 	}
 
 	c.inbound.config.hold = time.Minute
@@ -1023,10 +1037,31 @@ func TestInboundSwitchAndTrackerHold(t *testing.T) {
 		t.Fatal("nothing reached persistence")
 	}
 
+	hash3 := protocol.ID{7, 7, 7}
+
+	scrapeAndAnnounce(c, hash3)
+	startedDelay.Store(int64(300 * time.Millisecond))
+	c.inbound.register(nodeHasPeersForHash{infoHash: hash3, source: sourceSample})
+
+	if seen := nextAnnounce(t, announces); seen.event != 2 || seen.hash != hash3 {
+		t.Fatalf("want a started announce for the third hash, got %+v", seen)
+	}
+
+	c.inbound.fetchedOutgoing(hash3)
+
+	for n := range 2 {
+		if seen := nextAnnounce(t, announces); seen.event != 3 || seen.hash != hash3 {
+			t.Fatalf("stop %d of a swarm left while its start was unanswered: got %+v", n, seen)
+		}
+	}
+
+	startedDelay.Store(0)
+
 	for stage, want := range map[string]float64{
-		stageInboundRegistered: 2,
+		stageInboundRegistered: 3,
 		"announced":            2,
 		"expired":              1,
+		"fetched_outgoing":     1,
 		stageMetaInfoOK:        1,
 	} {
 		if got := hashCount(t, c, sourceInboundPeer, stage); got != want {

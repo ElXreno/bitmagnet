@@ -101,15 +101,17 @@ func (s *trackerScraper) release(hash protocol.ID) {
 	}
 
 	for index := range s.holdQueues {
-		if swarm.started&(1<<index) == 0 {
-			continue
+		if swarm.started&(1<<index) != 0 {
+			s.queueStop(index, swarm.priority, hash)
 		}
+	}
+}
 
-		select {
-		case s.holdQueues[index][swarm.priority] <- holdJob{hash: hash, stop: true}:
-		default:
-			s.countHold(index, "hold_stop_dropped")
-		}
+func (s *trackerScraper) queueStop(index int, priority int, hash protocol.ID) {
+	select {
+	case s.holdQueues[index][priority] <- holdJob{hash: hash, stop: true}:
+	default:
+		s.countHold(index, "hold_stop_dropped")
 	}
 }
 
@@ -137,7 +139,7 @@ func (s *trackerScraper) nextHold(index int, priority int) (announceJob, bool) {
 		select {
 		case job := <-s.holdQueues[index][priority]:
 			if job.stop || s.startHold(job.hash, index) {
-				return announceJob{hash: job.hash, hold: !job.stop, stop: job.stop}, true
+				return announceJob{hash: job.hash, priority: priority, hold: !job.stop, stop: job.stop}, true
 			}
 
 			s.countHold(index, "hold_stale")
@@ -147,15 +149,24 @@ func (s *trackerScraper) nextHold(index int, priority int) (announceJob, bool) {
 	}
 }
 
-func (s *trackerScraper) announceHold(ctx context.Context, index int, host string, hash protocol.ID) {
-	_, err := s.client.AnnounceStart(ctx, index, hash, s.holdParams)
+func (s *trackerScraper) announceHold(ctx context.Context, index int, host string, job announceJob) {
+	_, err := s.client.AnnounceStart(ctx, index, job.hash, s.holdParams)
+
+	s.holdMu.Lock()
+	_, held := s.held[job.hash]
+	s.holdMu.Unlock()
+
+	// the stop queued by release may have left before this start arrived
+	if !held {
+		s.queueStop(index, job.priority, job.hash)
+	}
 
 	switch {
 	case err == nil:
 		s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "hold_ok"}).Inc()
 
 		if s.onHeld != nil {
-			s.onHeld(hash)
+			s.onHeld(job.hash)
 		}
 	case errors.Is(err, tracker.ErrTimeout):
 		s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "hold_timeout"}).Inc()

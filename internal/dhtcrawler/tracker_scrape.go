@@ -419,10 +419,11 @@ func (c *crawler) unseeded(hash protocol.ID) bool {
 }
 
 type announceJob struct {
-	hash    protocol.ID
-	seeders uint32
-	hold    bool
-	stop    bool
+	hash     protocol.ID
+	seeders  uint32
+	priority int
+	hold     bool
+	stop     bool
 }
 
 // nextAnnounce pops the queued hash with the most seeders for tracker number index.
@@ -467,7 +468,7 @@ func (s *trackerScraper) runAnnounces(ctx context.Context, index int) {
 		case job.stop:
 			go s.announceStop(ctx, index, host, job.hash)
 		case job.hold:
-			go s.announceHold(ctx, index, host, job.hash)
+			go s.announceHold(ctx, index, host, job)
 		default:
 			go s.announce(ctx, index, host, job.hash, job.seeders)
 		}

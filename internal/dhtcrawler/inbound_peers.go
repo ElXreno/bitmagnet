@@ -459,6 +459,8 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 		return classifyDialError(err)
 	case errors.Is(err, metainforequester.ErrClosedNetworkPeer):
 		c.countHash(sourceInboundPeer, stageInboundClosedNetwork, 1)
+		c.closedSwarms.add(in.InfoHash)
+		p.release(in.InfoHash, "released_closed_swarm")
 
 		return classifyDialError(err)
 	case errors.Is(err, metainforequester.ErrIncomingHandshake):

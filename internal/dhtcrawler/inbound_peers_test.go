@@ -746,6 +746,28 @@ func TestLateSetSurvivesARestart(t *testing.T) {
 	}
 }
 
+func TestInboundClosedNetworkPeerReleasesTheHash(t *testing.T) {
+	t.Parallel()
+
+	i := newInboundTest(t, inboundConfig{maxHashes: 10, hold: time.Minute, maxConns: 4}, offlineScraper(1))
+	_, hash := inboundMetadata(t, "closed")
+
+	i.join(hash, 7)
+
+	_, _ = (peertest.Peer{InfoHash: hash, ID: [20]byte([]byte("-XT1000-04d9f58343e2")), Silent: true}).Dial(i.address())
+
+	eventually(t, "closed network peer", func() bool {
+		return hashCount(t, i.crawler, sourceInboundPeer, stageInboundClosedNetwork) == 1 &&
+			dialCount(t, i.crawler, "closed_network_peer") == 1 && len(i.registered()) == 0
+	})
+
+	i.nothingPersisted(t)
+
+	if hashCount(t, i.crawler, sourceInboundPeer, "released_closed_swarm") != 1 {
+		t.Fatal("the hash of a closed network peer must be released as a closed swarm")
+	}
+}
+
 func TestInboundRefusesWhatItCannotUse(t *testing.T) {
 	t.Parallel()
 
@@ -782,11 +804,6 @@ func TestInboundRefusesWhatItCannotUse(t *testing.T) {
 			"our own peer id",
 			peertest.Peer{InfoHash: hash, ID: [20]byte(i.inbound.receiver.PeerID()), Silent: true},
 			"self_conn", "self",
-		},
-		{
-			"closed network",
-			peertest.Peer{InfoHash: hash, ID: [20]byte([]byte("-XT1000-04d9f58343e2")), Silent: true},
-			stageInboundClosedNetwork, "closed_network_peer",
 		},
 	} {
 		_, _ = test.peer.Dial(i.address())

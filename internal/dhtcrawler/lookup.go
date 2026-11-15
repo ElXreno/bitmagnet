@@ -9,6 +9,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/server"
 )
 
 const (
@@ -18,6 +19,8 @@ const (
 	lookupEnoughPeers  = 8
 	lookupMaxPeers     = 16
 	lookupQueryTimeout = 2 * time.Second
+
+	lookupMaxLimiterWait = 50 * time.Millisecond
 )
 
 type lookupNode struct {
@@ -72,7 +75,7 @@ func (c *crawler) lookupPeers(
 
 	results := make(chan lookupResult, lookupMaxQueries)
 
-	lookupCtx, cancel := context.WithTimeout(ctx, lookupDeadline)
+	lookupCtx, cancel := context.WithTimeout(server.WithMaxLimiterWait(ctx, lookupMaxLimiterWait), lookupDeadline)
 	defer cancel()
 
 	for {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/server"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -41,10 +42,7 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 	})
 }
 
-const (
-	metaInfoParallelDials      = 4
-	metaInfoMaxUnansweredDials = 4
-)
+const metaInfoParallelDials = 4
 
 func (c *crawler) doRequestMetaInfo(
 	ctx context.Context,
@@ -75,7 +73,7 @@ func (c *crawler) doRequestMetaInfo(
 				cand.prev = "dead"
 			}
 
-			pingCtx, pingCancel := context.WithTimeout(ctx, peerProbeTimeout)
+			pingCtx, pingCancel := context.WithTimeout(server.WithMaxLimiterWait(ctx, lookupMaxLimiterWait), peerProbeTimeout)
 			defer pingCancel()
 
 			if _, pingErr := c.client.Ping(pingCtx, p); pingErr != nil {
@@ -98,10 +96,8 @@ func (c *crawler) doRequestMetaInfo(
 			candidates = append(candidates, cand)
 		case cand.prev == "dead":
 			c.probeTotal.With(prometheus.Labels{"prev": cand.prev, "ping": cand.ping, "dial": "skipped_dead"}).Inc()
-		case len(unanswered) < metaInfoMaxUnansweredDials:
-			unanswered = append(unanswered, cand)
 		default:
-			c.probeTotal.With(prometheus.Labels{"prev": cand.prev, "ping": cand.ping, "dial": "skipped_cap"}).Inc()
+			unanswered = append(unanswered, cand)
 		}
 	}
 

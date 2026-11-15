@@ -31,7 +31,16 @@ func (s queryLimiter) Query(
 	args dht.MsgArgs,
 ) (r dht.RecvMsg, err error) {
 	started := time.Now()
-	limitErr := s.queryLimiter.Wait(ctx, addr.Addr().String())
+	waitCtx := ctx
+
+	if maxWait, ok := ctx.Value(maxLimiterWaitKey{}).(time.Duration); ok {
+		var cancel context.CancelFunc
+
+		waitCtx, cancel = context.WithTimeout(ctx, maxWait)
+		defer cancel()
+	}
+
+	limitErr := s.queryLimiter.Wait(waitCtx, addr.Addr().String())
 	labels := prometheus.Labels{"query": q}
 
 	limiterWaitSeconds.With(labels).Add(time.Since(started).Seconds())
@@ -66,3 +75,11 @@ var limiterWaitErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name:      "limiter_wait_error_total",
 	Help:      "A counter of outgoing DHT queries abandoned while waiting in the rate limiter.",
 }, []string{"query"})
+
+type maxLimiterWaitKey struct{}
+
+// WithMaxLimiterWait makes queries sent with the returned context fail fast when the per-address limiter
+// would hold them for longer than d.
+func WithMaxLimiterWait(ctx context.Context, d time.Duration) context.Context {
+	return context.WithValue(ctx, maxLimiterWaitKey{}, d)
+}

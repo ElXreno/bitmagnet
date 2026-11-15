@@ -28,8 +28,8 @@ const (
 
 var (
 	lookupAlpha           = envInt("BITMAGNET_LOOKUP_ALPHA", 6)
-	lookupMaxQueries      = envInt("BITMAGNET_LOOKUP_MAX_QUERIES", 24)
-	lookupExtraAfterPeers = envInt("BITMAGNET_LOOKUP_EXTRA_AFTER_PEERS", 6)
+	lookupMaxQueries      = envInt("BITMAGNET_LOOKUP_MAX_QUERIES", 12)
+	lookupExtraAfterPeers = envInt("BITMAGNET_LOOKUP_EXTRA_AFTER_PEERS", 3)
 )
 
 func envInt(name string, fallback int) int {
@@ -103,7 +103,7 @@ func (c *crawler) lookupPeers(
 		node    *lookupNode
 	}
 
-	results := make(chan lookupResult, lookupMaxQueries)
+	results := make(chan lookupResult, 4*lookupMaxQueries)
 
 	lookupCtx, cancel := context.WithTimeout(server.WithMaxLimiterWait(ctx, lookupMaxLimiterWait), lookupDeadline)
 	defer cancel()

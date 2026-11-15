@@ -99,7 +99,7 @@ var peerCodes = map[string]string{
 	"XF": "xfplay",
 	"XL": "xunlei",
 	"XS": "xswifter",
-	"XT": "xantorrent",
+	"XT": XT,
 	"XX": "xtorrent",
 	"ZO": "zona",
 	"ZT": "ziptorrent",

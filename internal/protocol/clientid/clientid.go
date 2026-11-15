@@ -5,7 +5,14 @@ const (
 	Other     = "other"
 	None      = "none"
 	Bitmagnet = "bitmagnet"
+	XT        = "xt"
 )
+
+// ClosedNetwork reports whether a peer client belongs to a network that shares the DHT but keeps its swarms to
+// itself: its peers complete the handshake and never serve meta info.
+func ClosedNetwork(client string) bool {
+	return client == XT
+}
 
 var peerPrefixes = []struct{ prefix, name string }{
 	{"TIX", "tixati"},

@@ -22,6 +22,7 @@ func TestPeer(t *testing.T) {
 		"A2-1-37-0-abcdefghij": "aria2",
 		"-ZZ0000-abcdefghijkl": Other,
 		"-XF9990-abcdefghijkl": "xfplay",
+		"-XT1000-04d9f58343e2": XT,
 		"-BN0001-abcdefghijkl": "baidu-netdisk",
 		"-BL246326abcdefghijk": "bitlord",
 		"-SD0100-abcdefghijkl": "xunlei",
@@ -32,6 +33,14 @@ func TestPeer(t *testing.T) {
 		if got := Peer(id(peerID)); got != want {
 			t.Errorf("%q: want %s, got %s", peerID, want, got)
 		}
+	}
+}
+
+func TestClosedNetwork(t *testing.T) {
+	t.Parallel()
+
+	if !ClosedNetwork(Peer(id("-XT1000-04d9f58343e2"))) || ClosedNetwork(Peer(id("-qB4650-abcdefghijkl"))) || ClosedNetwork(Other) {
+		t.Fatal("only the XT network is closed")
 	}
 }
 

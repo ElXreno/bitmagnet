@@ -17,6 +17,10 @@ var errBanned = errors.New("banned")
 
 var errNoCandidates = errors.New("no peers worth dialing")
 
+var errClosedSwarm = errors.New("swarm of a closed network")
+
+var closedSwarmPolicy = os.Getenv("BITMAGNET_CLOSED_SWARM") != "off"
+
 func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 	_ = c.requestMetaInfo.Run(ctx, func(req infoHashWithPeers) {
 		if c.fetched.test(req.infoHash) {
@@ -30,6 +34,15 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 			if errors.Is(reqErr, errBanned) {
 				c.countHash(req.source, stageBanned, 1)
 				c.trackerOutcome(req.infoHash, stageBanned)
+			} else if errors.Is(reqErr, errClosedSwarm) {
+				c.countHash(req.source, "closed_swarm", 1)
+				c.trackerOutcome(req.infoHash, "closed_swarm")
+
+				if closedSwarmPolicy {
+					c.closedSwarms.add(req.infoHash)
+				} else {
+					c.giveUp(req.infoHash)
+				}
 			} else if errors.Is(reqErr, errNoCandidates) {
 				c.countHash(req.source, "no_candidates", 1)
 				c.trackerOutcome(req.infoHash, "no_candidates")
@@ -167,6 +180,8 @@ func (c *crawler) doRequestMetaInfo(
 
 	var errs []error
 
+	closedPeers := 0
+
 	for {
 		for inflight < metaInfoParallelDials && next < len(candidates) {
 			cand := candidates[next]
@@ -220,6 +235,15 @@ func (c *crawler) doRequestMetaInfo(
 		if r.err != nil {
 			errs = append(errs, r.err)
 
+			if errors.Is(r.err, metainforequester.ErrClosedNetworkPeer) {
+				closedPeers++
+
+				if closedSwarmPolicy && next < len(candidates) {
+					c.countHash(source, "closed_swarm_dials_skipped", len(candidates)-next)
+					next = len(candidates)
+				}
+			}
+
 			continue
 		}
 
@@ -238,6 +262,10 @@ func (c *crawler) doRequestMetaInfo(
 
 	if len(errs) == 0 {
 		return metainforequester.Response{}, errNoCandidates
+	}
+
+	if closedPeers > 0 {
+		return metainforequester.Response{}, errors.Join(errClosedSwarm, errors.Join(errs...))
 	}
 
 	return metainforequester.Response{}, errors.Join(errs...)

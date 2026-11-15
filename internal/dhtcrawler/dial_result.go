@@ -21,6 +21,10 @@ func classifyDialError(err error) string {
 		return "limited"
 	}
 
+	if errors.Is(err, metainforequester.ErrClosedNetworkPeer) {
+		return "closed_network_peer"
+	}
+
 	var opErr *net.OpError
 	if errors.As(err, &opErr) && opErr.Op == "dial" {
 		switch {

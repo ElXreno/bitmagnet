@@ -35,6 +35,9 @@ type requester struct {
 	utp      *utp.Socket
 }
 
+// ErrClosedNetworkPeer marks a failed fetch from a peer of a network that does not serve meta info.
+var ErrClosedNetworkPeer = errors.New("peer of a closed network")
+
 type utpFallbackKey struct{}
 
 // WithUTPFallback lets requests made with the returned context retry over uTP when the TCP dial times out.
@@ -188,14 +191,21 @@ func (r requester) request(
 		peerClientTotal.With(prometheus.Labels{"client": peerClient, "stage": stage}).Inc()
 		dumpPeerID(addr, infoHash, hsInfo, peerClient, stage, peerVersion)
 	}
+	failed := func(stage string, err error) (Response, error) {
+		outcome(stage)
+
+		if clientid.ClosedNetwork(peerClient) {
+			err = errors.Join(ErrClosedNetworkPeer, err)
+		}
+
+		return Response{}, err
+	}
 
 	peerClientTotal.With(prometheus.Labels{"client": peerClient, "stage": "handshake"}).Inc()
 
 	handshake, exHandshakeErr := readExHandshake(rw)
 	if exHandshakeErr != nil {
-		outcome("no_ext_handshake")
-
-		return Response{}, exHandshakeErr
+		return failed("no_ext_handshake", exHandshakeErr)
 	}
 
 	peerVersion = handshake.V
@@ -203,32 +213,24 @@ func (r requester) request(
 	metadataSize, utMetadata, offerErr := handshake.metadata()
 	if offerErr != nil {
 		if errors.Is(offerErr, errNoMetadataSize) {
-			outcome("no_metadata_size")
-		} else {
-			outcome("no_ut_metadata")
+			return failed("no_metadata_size", offerErr)
 		}
 
-		return Response{}, offerErr
+		return failed("no_ut_metadata", offerErr)
 	}
 
 	if requestAllPiecesErr := requestAllPieces(rw, metadataSize, utMetadata); requestAllPiecesErr != nil {
-		outcome("pieces_failed")
-
-		return Response{}, requestAllPiecesErr
+		return failed("pieces_failed", requestAllPiecesErr)
 	}
 
 	pieces, readAllPiecesErr := readAllPieces(rw, metadataSize)
 	if readAllPiecesErr != nil {
-		outcome("pieces_failed")
-
-		return Response{}, readAllPiecesErr
+		return failed("pieces_failed", readAllPiecesErr)
 	}
 
 	parsed, parseErr := metainfo.ParseMetaInfoBytes(infoHash, pieces)
 	if parseErr != nil {
-		outcome("bad_metainfo")
-
-		return Response{}, parseErr
+		return failed("bad_metainfo", parseErr)
 	}
 
 	outcome("metainfo")

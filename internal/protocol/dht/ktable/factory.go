@@ -16,13 +16,20 @@ type Params struct {
 
 type Result struct {
 	fx.Out
-	Table                Table
-	NodesCountGauge      prometheus.Collector `group:"prometheus_collectors"`
-	NodesAddedCounter    prometheus.Collector `group:"prometheus_collectors"`
-	NodesDroppedCounter  prometheus.Collector `group:"prometheus_collectors"`
-	HashesCountGauge     prometheus.Collector `group:"prometheus_collectors"`
-	HashesAddedCounter   prometheus.Collector `group:"prometheus_collectors"`
-	HashesDroppedCounter prometheus.Collector `group:"prometheus_collectors"`
+	Table                 Table
+	Table6                Table                `name:"dht_ktable_ipv6"`
+	NodesCountGauge       prometheus.Collector `group:"prometheus_collectors"`
+	NodesAddedCounter     prometheus.Collector `group:"prometheus_collectors"`
+	NodesDroppedCounter   prometheus.Collector `group:"prometheus_collectors"`
+	HashesCountGauge      prometheus.Collector `group:"prometheus_collectors"`
+	HashesAddedCounter    prometheus.Collector `group:"prometheus_collectors"`
+	HashesDroppedCounter  prometheus.Collector `group:"prometheus_collectors"`
+	Nodes6CountGauge      prometheus.Collector `group:"prometheus_collectors"`
+	Nodes6AddedCounter    prometheus.Collector `group:"prometheus_collectors"`
+	Nodes6DroppedCounter  prometheus.Collector `group:"prometheus_collectors"`
+	Hashes6CountGauge     prometheus.Collector `group:"prometheus_collectors"`
+	Hashes6AddedCounter   prometheus.Collector `group:"prometheus_collectors"`
+	Hashes6DroppedCounter prometheus.Collector `group:"prometheus_collectors"`
 }
 
 const (
@@ -31,10 +38,36 @@ const (
 )
 
 func New(p Params) Result {
+	table4, nodesCollector, hashesCollector := newTable(p.NodeID, false, "")
+	table6, nodes6Collector, hashes6Collector := newTable(p.NodeID, true, "6")
+
+	return Result{
+		Table:                 table4,
+		Table6:                table6,
+		NodesCountGauge:       nodesCollector.CountGauge,
+		NodesAddedCounter:     nodesCollector.AddedCounter,
+		NodesDroppedCounter:   nodesCollector.DroppedCounter,
+		HashesCountGauge:      hashesCollector.CountGauge,
+		HashesAddedCounter:    hashesCollector.AddedCounter,
+		HashesDroppedCounter:  hashesCollector.DroppedCounter,
+		Nodes6CountGauge:      nodes6Collector.CountGauge,
+		Nodes6AddedCounter:    nodes6Collector.AddedCounter,
+		Nodes6DroppedCounter:  nodes6Collector.DroppedCounter,
+		Hashes6CountGauge:     hashes6Collector.CountGauge,
+		Hashes6AddedCounter:   hashes6Collector.AddedCounter,
+		Hashes6DroppedCounter: hashes6Collector.DroppedCounter,
+	}
+}
+
+func newTable(
+	nodeID ID,
+	ipv6 bool,
+	suffix string,
+) (t *table, nodesCollector btree.PrometheusCollector, hashesCollector btree.PrometheusCollector) {
 	rm := &reverseMap{addrs: make(map[string]*infoForAddr)}
 	nodes := nodeKeyspace{
 		keyspace: newKeyspace[netip.AddrPort, NodeOption, Node, *node](
-			p.NodeID,
+			nodeID,
 			nodesK,
 			func(id ID, addr netip.AddrPort) *node {
 				return &node{
@@ -48,10 +81,10 @@ func New(p Params) Result {
 			},
 		),
 	}
-	nodesCollector := patchPrometheusCollector("nodes", &nodes.keyspace)
+	nodesCollector = patchPrometheusCollector("nodes"+suffix, &nodes.keyspace)
 	hashes := hashKeyspace{
 		keyspace: newKeyspace[[]HashPeer, HashOption, Hash, *hash](
-			p.NodeID,
+			nodeID,
 			hashesK,
 			func(id ID, peers []HashPeer) *hash {
 				peersMap := make(map[string]HashPeer, len(peers))
@@ -68,24 +101,17 @@ func New(p Params) Result {
 			},
 		),
 	}
-	hashesCollector := patchPrometheusCollector("hashes", &hashes.keyspace)
+	hashesCollector = patchPrometheusCollector("hashes"+suffix, &hashes.keyspace)
 
-	return Result{
-		Table: &table{
-			origin:  p.NodeID,
-			nodesK:  nodesK,
-			hashesK: hashesK,
-			nodes:   nodes,
-			hashes:  hashes,
-			addrs:   rm,
-		},
-		NodesCountGauge:      nodesCollector.CountGauge,
-		NodesAddedCounter:    nodesCollector.AddedCounter,
-		NodesDroppedCounter:  nodesCollector.DroppedCounter,
-		HashesCountGauge:     hashesCollector.CountGauge,
-		HashesAddedCounter:   hashesCollector.AddedCounter,
-		HashesDroppedCounter: hashesCollector.DroppedCounter,
-	}
+	return &table{
+		origin:  nodeID,
+		ipv6:    ipv6,
+		nodesK:  nodesK,
+		hashesK: hashesK,
+		nodes:   nodes,
+		hashes:  hashes,
+		addrs:   rm,
+	}, nodesCollector, hashesCollector
 }
 
 const (

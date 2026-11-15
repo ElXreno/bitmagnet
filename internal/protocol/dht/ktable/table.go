@@ -52,6 +52,7 @@ type SampleHashesAndNodesResult struct {
 type table struct {
 	mutex   sync.RWMutex
 	origin  ID
+	ipv6    bool
 	nodesK  int
 	hashesK int
 	nodes   nodeKeyspace

@@ -24,7 +24,7 @@ type PutNode struct {
 }
 
 func (c PutNode) execReturn(t *table) btree.PutResult {
-	if !c.Addr.IsValid() {
+	if !c.Addr.IsValid() || (c.Addr.Addr().Is6() && !c.Addr.Addr().Is4In6()) != t.ipv6 {
 		return btree.PutRejected
 	}
 

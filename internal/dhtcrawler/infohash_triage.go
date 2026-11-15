@@ -112,6 +112,11 @@ func (c *crawler) runInfoHashTriage(
 					}
 
 					c.countHash(r.source, stageNeedsMetaInfo, 1)
+
+					if r.visit != "" {
+						c.countHash(r.source, stageNeedsMetaInfo+"_"+r.visit, 1)
+					}
+
 					c.trackers.submit(r.infoHash)
 					c.trackers6.submit(r.infoHash)
 

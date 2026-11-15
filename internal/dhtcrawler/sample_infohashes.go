@@ -63,7 +63,11 @@ func (c *crawler) sampleNode(ctx context.Context, f *nodeFamily, n ktable.Node) 
 			}
 		}
 
-		c.countSampledNode(f, n.ID(), res.Num, res.Interval, len(res.Samples), len(discoveredHashes))
+		visit := c.countSampledNode(f, n.ID(), res.Num, res.Interval, len(res.Samples), len(discoveredHashes))
+		for i := range discoveredHashes {
+			discoveredHashes[i].visit = visit
+		}
+
 		c.countHash("sample_nodes"+f.suffix, "revisit_"+f.revisits.plan(n, res.Num, len(res.Samples), len(discoveredHashes)), 1)
 		c.countHash(source, stageDiscovered, len(discoveredHashes))
 		c.countHash(source, stageDuplicate, len(res.Samples)-len(discoveredHashes))
@@ -118,7 +122,7 @@ func (c *crawler) sampleNode(ctx context.Context, f *nodeFamily, n ktable.Node) 
 // run, how many info hashes it says it stores and how many new ones the visit produced.
 func (c *crawler) countSampledNode(
 	f *nodeFamily, id protocol.ID, stored int, interval int, samples int, fresh int,
-) {
+) string {
 	visit := "first"
 	if f.sampledNodes.testAndAdd(id) {
 		visit = "repeat"
@@ -150,4 +154,6 @@ func (c *crawler) countSampledNode(
 	default:
 		c.countHash(source, "interval_gt_1h", 1)
 	}
+
+	return visit
 }

@@ -129,6 +129,7 @@ type nodeHasPeersForHash struct {
 	node     netip.AddrPort
 	source   string
 	peers    []netip.AddrPort
+	visit    string
 }
 
 const (

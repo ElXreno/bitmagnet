@@ -45,6 +45,11 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 
 		c.fetched.add(req.infoHash)
 		c.countHash(req.source, stageMetaInfoOK, 1)
+
+		if req.visit != "" {
+			c.countHash(req.source, stageMetaInfoOK+"_"+req.visit, 1)
+		}
+
 		c.trackerOutcome(req.infoHash, stageMetaInfoOK)
 		select {
 		case <-ctx.Done():

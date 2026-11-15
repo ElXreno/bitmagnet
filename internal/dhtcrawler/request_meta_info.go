@@ -169,6 +169,8 @@ func (c *crawler) doRequestMetaInfo(
 					c.deadPeers.add(peerKey(cand.addr))
 				}
 
+				dumpPeer(outcome, cand.ping, cand.addr)
+
 				if outcome != "skipped" {
 					c.probeTotal.With(prometheus.Labels{"prev": cand.prev, "ping": cand.ping, "dial": outcome}).Inc()
 				}

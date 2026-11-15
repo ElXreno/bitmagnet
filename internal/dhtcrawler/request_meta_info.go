@@ -26,7 +26,11 @@ const (
 	implClosedHint = "closed_hint"
 )
 
+var errClosedSwarmHint = errors.New("every answering peer is a node of a closed network")
+
 var closedSwarmPolicy = os.Getenv("BITMAGNET_CLOSED_SWARM") != "off"
+
+var closedSwarmHintPolicy = closedSwarmPolicy && os.Getenv("BITMAGNET_CLOSED_SWARM_HINT") != "off"
 
 func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 	_ = c.requestMetaInfo.Run(ctx, func(req infoHashWithPeers) {
@@ -50,6 +54,10 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 				} else {
 					c.giveUp(req.infoHash)
 				}
+			} else if errors.Is(reqErr, errClosedSwarmHint) {
+				c.countHash(req.source, "closed_swarm_hint", 1)
+				c.trackerOutcome(req.infoHash, "closed_swarm_hint")
+				c.closedSwarms.add(req.infoHash)
 			} else if errors.Is(reqErr, errNoCandidates) {
 				c.countHash(req.source, "no_candidates", 1)
 				c.trackerOutcome(req.infoHash, "no_candidates")
@@ -219,6 +227,13 @@ func (c *crawler) doRequestMetaInfo(
 
 	countSwarm := func(outcome string) {
 		c.swarmTotal.With(prometheus.Labels{"class": swarm, "outcome": outcome}).Inc()
+	}
+
+	if closedSwarmHintPolicy && swarm == "hint_only" && !c.seeded(hash) {
+		countSwarm("skipped_hint")
+		c.countHash(source, "closed_swarm_dials_skipped", len(candidates))
+
+		return metainforequester.Response{}, errClosedSwarmHint
 	}
 
 	results := make(chan dialResult, len(candidates))

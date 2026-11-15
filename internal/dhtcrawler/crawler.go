@@ -243,11 +243,15 @@ func (c *crawler) saveFailedHashes(ctx context.Context) {
 
 // giveUp records that the meta info of hash could not be fetched, so that it is left alone for a while.
 func (c *crawler) giveUp(hash protocol.ID) {
-	if c.failedSeeded != nil && (c.trackers.swarm(hash) == "seeded" || c.trackers6.swarm(hash) == "seeded") {
+	if c.failedSeeded != nil && c.seeded(hash) {
 		c.failedSeeded.add(hash)
 
 		return
 	}
 
 	c.failed.add(hash)
+}
+
+func (c *crawler) seeded(hash protocol.ID) bool {
+	return c.trackers.swarm(hash) == "seeded" || c.trackers6.swarm(hash) == "seeded"
 }

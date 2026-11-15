@@ -76,9 +76,28 @@ func TestSwarmClassFollowsTheNodeVersions(t *testing.T) {
 	} {
 		c := newTestCrawler(nil, nil)
 		c.client = versionClient{versions: test.versions}
-		c.metainfoRequester = closedNetworkRequester{calls: new(atomic.Int32)}
+
+		calls := new(atomic.Int32)
+		c.metainfoRequester = closedNetworkRequester{calls: calls}
 
 		_, err := c.doRequestMetaInfo(context.Background(), sourceSample, protocol.ID{1}, peers)
+
+		if test.swarm == "hint_only" {
+			if !errors.Is(err, errClosedSwarmHint) || calls.Load() != 0 {
+				t.Fatalf("%s: want errClosedSwarmHint and no dials, got %v after %d dials", name, err, calls.Load())
+			}
+
+			if got := counted(t, c.swarmTotal, test.swarm, "skipped_hint"); got != 1 {
+				t.Errorf("%s: want one skipped swarm, got %v", name, got)
+			}
+
+			if !c.pingCache.closedHint(peers[0]) || c.pingCache.closedHint(peers[2]) {
+				t.Errorf("%s: the ping cache must keep the hint of the nodes that carry it", name)
+			}
+
+			continue
+		}
+
 		if !errors.Is(err, errClosedSwarm) {
 			t.Fatalf("%s: want errClosedSwarm, got %v", name, err)
 		}
@@ -87,13 +106,9 @@ func TestSwarmClassFollowsTheNodeVersions(t *testing.T) {
 			t.Errorf("%s: want one closed swarm counted as %s, got %v", name, test.swarm, got)
 		}
 
-		if test.swarm == "hint_only" {
-			if got := counted(t, c.peerDialTotal, implClosedHint, "closed_network_peer"); got != 2 {
-				t.Errorf("%s: want two dials to hinted peers, got %v", name, got)
-			}
-
-			if !c.pingCache.closedHint(peers[0]) || c.pingCache.closedHint(peers[2]) {
-				t.Errorf("%s: the ping cache must keep the hint of the nodes that carry it", name)
+		if test.swarm == "hint_mixed" {
+			if got := counted(t, c.peerDialTotal, implClosedHint, "closed_network_peer"); got != 1 {
+				t.Errorf("%s: want one dial to the hinted peer, got %v", name, got)
 			}
 		}
 	}

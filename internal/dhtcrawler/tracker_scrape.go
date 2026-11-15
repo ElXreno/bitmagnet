@@ -3,6 +3,8 @@ package dhtcrawler
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -20,6 +22,11 @@ const (
 	trackerCacheTTL      = 10 * time.Minute
 	trackerBatchWait     = 250 * time.Millisecond
 	trackerScrapeTimeout = 3 * time.Second
+
+	trackerAnnounceQueue   = 2000
+	trackerAnnounceWorkers = 128
+	trackerAnnounceNumWant = 30
+	trackerAnnounceMaxWait = 2 * time.Second
 )
 
 var defaultTrackers = []string{
@@ -58,19 +65,30 @@ func newTrackerMetrics() trackerMetrics {
 }
 
 type trackerInfo struct {
-	seeders  uint32
-	leechers uint32
+	seeders   uint32
+	leechers  uint32
+	announced bool
+}
+
+type announceJob struct {
+	hash    protocol.ID
+	tracker int
+	seeders uint32
 }
 
 // trackerScraper asks public UDP trackers about the swarms of info hashes in batches (BEP 15 scrape).
 // It only reads swarm sizes: it never announces, so the crawler does not show up in any swarm.
 type trackerScraper struct {
-	client   *tracker.Client
-	limiters []*rate.Limiter
-	in       chan protocol.ID
-	mu       sync.Mutex
-	cache    *lru.LRU[protocol.ID, trackerInfo]
-	metrics  trackerMetrics
+	client           *tracker.Client
+	limiters         []*rate.Limiter
+	in               chan protocol.ID
+	announces        chan announceJob
+	announceLimiters []*rate.Limiter
+	announceParams   tracker.AnnounceParams
+	onPeers          func(ctx context.Context, hash protocol.ID, seeders uint32, peers []netip.AddrPort)
+	mu               sync.Mutex
+	cache            *lru.LRU[protocol.ID, trackerInfo]
+	metrics          trackerMetrics
 }
 
 func newTrackerScraper(metrics trackerMetrics) (*trackerScraper, error) {
@@ -96,13 +114,33 @@ func newTrackerScraper(metrics trackerMetrics) (*trackerScraper, error) {
 		limiters[i] = rate.NewLimiter(rate.Limit(packetsPerSecond), packetsPerSecond)
 	}
 
-	return &trackerScraper{
+	scraper := &trackerScraper{
 		client:   client,
 		limiters: limiters,
 		in:       make(chan protocol.ID, 100*tracker.MaxScrapeHashes),
 		cache:    lru.NewLRU[protocol.ID, trackerInfo](trackerCacheSize, nil, trackerCacheTTL),
 		metrics:  metrics,
-	}, nil
+	}
+
+	if os.Getenv("BITMAGNET_TRACKER_ANNOUNCE") != "off" {
+		announcesPerSecond := envInt("BITMAGNET_TRACKER_ANNOUNCE_PPS", 20)
+
+		scraper.announces = make(chan announceJob, trackerAnnounceQueue)
+		scraper.announceLimiters = make([]*rate.Limiter, len(hosts))
+
+		for i := range hosts {
+			scraper.announceLimiters[i] = rate.NewLimiter(rate.Limit(announcesPerSecond), announcesPerSecond)
+		}
+
+		scraper.announceParams = tracker.AnnounceParams{
+			PeerID:  protocol.RandomPeerID(),
+			Key:     rand.Uint32(),
+			Port:    uint16(envInt("BITMAGNET_TRACKER_ANNOUNCE_PORT", 6881)),
+			NumWant: trackerAnnounceNumWant,
+		}
+	}
+
+	return scraper, nil
 }
 
 func (s *trackerScraper) submit(hash protocol.ID) {
@@ -139,6 +177,12 @@ func (s *trackerScraper) swarm(hash protocol.ID) string {
 func (s *trackerScraper) run(ctx context.Context) {
 	if s == nil {
 		return
+	}
+
+	if s.announces != nil {
+		for range trackerAnnounceWorkers {
+			go s.runAnnounces(ctx)
+		}
 	}
 
 	batch := make([]protocol.ID, 0, tracker.MaxScrapeHashes)
@@ -215,6 +259,16 @@ func (s *trackerScraper) scrape(ctx context.Context, index int, host string, has
 		info, _ := s.cache.Get(hashes[i])
 		info.seeders = max(info.seeders, r.Seeders)
 		info.leechers = max(info.leechers, r.Leechers)
+
+		if s.announces != nil && r.Seeders > 0 && !info.announced {
+			select {
+			case s.announces <- announceJob{hash: hashes[i], tracker: index, seeders: r.Seeders}:
+				info.announced = true
+			default:
+				s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_queue_full"}).Inc()
+			}
+		}
+
 		s.cache.Add(hashes[i], info)
 	}
 }
@@ -239,4 +293,73 @@ func (c *crawler) unseeded(hash protocol.ID) bool {
 	swarm := c.trackers.swarm(hash)
 
 	return swarm == "leechers" || swarm == "unknown"
+}
+
+func (s *trackerScraper) runAnnounces(ctx context.Context) {
+	hosts := s.client.Trackers()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case job := <-s.announces:
+			host := hosts[job.tracker]
+
+			waitCtx, cancel := context.WithTimeout(ctx, trackerAnnounceMaxWait)
+			limitErr := s.announceLimiters[job.tracker].Wait(waitCtx)
+
+			cancel()
+
+			if limitErr != nil {
+				s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_rate_limited"}).Inc()
+
+				continue
+			}
+
+			result, err := s.client.Announce(ctx, job.tracker, job.hash, s.announceParams)
+
+			switch {
+			case err == nil && len(result.Peers) > 0:
+				s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_ok"}).Inc()
+
+				if s.onPeers != nil {
+					s.onPeers(ctx, job.hash, job.seeders, result.Peers)
+				}
+			case err == nil:
+				s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_no_peers"}).Inc()
+			case errors.Is(err, tracker.ErrTimeout):
+				s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_timeout"}).Inc()
+			default:
+				s.metrics.packets.With(prometheus.Labels{"tracker": host, "result": "announce_error"}).Inc()
+			}
+		}
+	}
+}
+
+func trackerSource(seeders uint32) string {
+	switch {
+	case seeders >= 20:
+		return "tracker_20"
+	case seeders >= 5:
+		return "tracker_5_19"
+	case seeders >= 2:
+		return "tracker_2_4"
+	default:
+		return "tracker_1"
+	}
+}
+
+func (c *crawler) trackerPeers(ctx context.Context, hash protocol.ID, seeders uint32, peers []netip.AddrPort) {
+	source := trackerSource(seeders)
+
+	c.countHash(source, stageDiscovered, 1)
+	c.countHash(source, stagePeersSum, len(peers))
+
+	if c.fetched.test(hash) {
+		c.countHash(source, stageAlreadyFetched, 1)
+
+		return
+	}
+
+	c.forwardPeers(ctx, nodeHasPeersForHash{infoHash: hash, source: source}, peers)
 }

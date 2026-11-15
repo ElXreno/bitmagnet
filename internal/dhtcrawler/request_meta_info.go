@@ -19,6 +19,12 @@ var errNoCandidates = errors.New("no peers worth dialing")
 
 func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 	_ = c.requestMetaInfo.Run(ctx, func(req infoHashWithPeers) {
+		if c.fetched.test(req.infoHash) {
+			c.countHash(req.source, stageAlreadyFetched, 1)
+
+			return
+		}
+
 		mi, reqErr := c.doRequestMetaInfo(ctx, req.source, req.infoHash, req.peers)
 		if reqErr != nil {
 			if errors.Is(reqErr, errBanned) {
@@ -35,6 +41,7 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 			return
 		}
 
+		c.fetched.add(req.infoHash)
 		c.countHash(req.source, stageMetaInfoOK, 1)
 		c.trackerOutcome(req.infoHash, stageMetaInfoOK)
 		select {

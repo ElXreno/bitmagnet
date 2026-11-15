@@ -44,6 +44,7 @@ type crawler struct {
 	nodePool                     *nodePool
 	pingCache                    *pingCache
 	trackers                     *trackerScraper
+	fetched                      *ignoreFilter
 	nodesForPing                 concurrency.BufferedConcurrentChannel[ktable.Node]
 	nodesForFindNode             concurrency.BufferedConcurrentChannel[ktable.Node]
 	nodesForSampleInfoHashes     concurrency.BufferedConcurrentChannel[ktable.Node]
@@ -93,6 +94,10 @@ func (c *crawler) start() {
 	go c.runLookups(ctx, c.lookupsInbound)
 	go c.reportStages(ctx)
 	go c.runNodePool(ctx)
+	if c.trackers != nil {
+		c.trackers.onPeers = c.trackerPeers
+	}
+
 	go c.trackers.run(ctx)
 	go c.runRequestMetaInfo(ctx)
 	go c.runScrape(ctx)
@@ -111,27 +116,28 @@ type nodeHasPeersForHash struct {
 }
 
 const (
-	sourceSampleLookup = "sample_infohashes_lookup"
-	stageLookupFound   = "lookup_found"
-	stageLookupEmpty   = "lookup_empty"
-	stageLookupQueries = "lookup_queries"
-	stageScrapeDropped = "scrape_dropped"
-	stageLookupDropped = "lookup_dropped"
-	sourceSample       = "sample_infohashes"
-	stageDiscovered    = "discovered"
-	stageNeedsMetaInfo = "needs_metainfo"
-	stagePersisted     = "persisted"
-	stageDuplicate     = "duplicate"
-	stageBlocked       = "blocked"
-	stageKnown         = "known"
-	stageScrape        = "scrape"
-	stageGetPeersError = "get_peers_error"
-	stageNoPeers       = "no_peers"
-	stagePeersFound    = "peers_found"
-	stagePeersSum      = "peers_sum"
-	stageMetaInfoOK    = "metainfo_ok"
-	stageMetaInfoFail  = "metainfo_failed"
-	stageBanned        = "banned"
+	sourceSampleLookup  = "sample_infohashes_lookup"
+	stageLookupFound    = "lookup_found"
+	stageLookupEmpty    = "lookup_empty"
+	stageLookupQueries  = "lookup_queries"
+	stageScrapeDropped  = "scrape_dropped"
+	stageAlreadyFetched = "already_fetched"
+	stageLookupDropped  = "lookup_dropped"
+	sourceSample        = "sample_infohashes"
+	stageDiscovered     = "discovered"
+	stageNeedsMetaInfo  = "needs_metainfo"
+	stagePersisted      = "persisted"
+	stageDuplicate      = "duplicate"
+	stageBlocked        = "blocked"
+	stageKnown          = "known"
+	stageScrape         = "scrape"
+	stageGetPeersError  = "get_peers_error"
+	stageNoPeers        = "no_peers"
+	stagePeersFound     = "peers_found"
+	stagePeersSum       = "peers_sum"
+	stageMetaInfoOK     = "metainfo_ok"
+	stageMetaInfoFail   = "metainfo_failed"
+	stageBanned         = "banned"
 )
 
 func (c *crawler) countHash(source string, stage string, n int) {

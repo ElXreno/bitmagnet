@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -19,11 +20,14 @@ const MaxScrapeHashes = 74
 const (
 	protocolID        = 0x41727101980
 	actionConnect     = 0
+	actionAnnounce    = 1
 	actionScrape      = 2
 	actionError       = 3
 	connectionIDTTL   = 50 * time.Second
 	resolveTTL        = 10 * time.Minute
 	scrapeEntryLength = 12
+	eventStarted      = 2
+	eventStopped      = 3
 )
 
 var (
@@ -253,4 +257,98 @@ func (c *Client) Scrape(ctx context.Context, index int, hashes []protocol.ID) ([
 	}
 
 	return results, nil
+}
+
+type AnnounceResult struct {
+	Interval uint32
+	Leechers uint32
+	Seeders  uint32
+	Peers    []netip.AddrPort
+}
+
+// AnnounceParams describes how the client presents itself to a tracker.
+type AnnounceParams struct {
+	PeerID  protocol.ID
+	Key     uint32
+	Port    uint16
+	NumWant int32
+}
+
+func (c *Client) announceRequest(
+	connectionID uint64,
+	transactionID uint32,
+	hash protocol.ID,
+	params AnnounceParams,
+	event uint32,
+	numWant int32,
+) []byte {
+	request := make([]byte, 98)
+	binary.BigEndian.PutUint64(request[0:8], connectionID)
+	binary.BigEndian.PutUint32(request[8:12], actionAnnounce)
+	binary.BigEndian.PutUint32(request[12:16], transactionID)
+	copy(request[16:36], hash[:])
+	copy(request[36:56], params.PeerID[:])
+	binary.BigEndian.PutUint64(request[64:72], 1<<30)
+	binary.BigEndian.PutUint32(request[80:84], event)
+	binary.BigEndian.PutUint32(request[88:92], params.Key)
+	binary.BigEndian.PutUint32(request[92:96], uint32(numWant))
+	binary.BigEndian.PutUint16(request[96:98], params.Port)
+
+	return request
+}
+
+// Announce joins the swarm of hash on tracker number index as a leecher, takes the peers the tracker returns
+// and leaves the swarm again at once with a stopped event, which is sent without waiting for an answer.
+func (c *Client) Announce(
+	ctx context.Context,
+	index int,
+	hash protocol.ID,
+	params AnnounceParams,
+) (AnnounceResult, error) {
+	t := c.trackers[index]
+
+	addr, connectionID, err := c.connection(ctx, t)
+	if err != nil {
+		return AnnounceResult{}, err
+	}
+
+	transactionID := newTransactionID()
+
+	response, err := c.roundTrip(
+		ctx, addr, transactionID,
+		c.announceRequest(connectionID, transactionID, hash, params, eventStarted, params.NumWant),
+	)
+	if err != nil {
+		if errors.Is(err, ErrTracker) {
+			t.mu.Lock()
+			t.connectedAt = time.Time{}
+			t.mu.Unlock()
+		}
+
+		return AnnounceResult{}, err
+	}
+
+	_, _ = c.conn.WriteToUDP(
+		c.announceRequest(connectionID, newTransactionID(), hash, params, eventStopped, 0), addr)
+
+	if binary.BigEndian.Uint32(response[0:4]) != actionAnnounce || len(response) < 20 || (len(response)-20)%6 != 0 {
+		return AnnounceResult{}, ErrResponse
+	}
+
+	result := AnnounceResult{
+		Interval: binary.BigEndian.Uint32(response[8:12]),
+		Leechers: binary.BigEndian.Uint32(response[12:16]),
+		Seeders:  binary.BigEndian.Uint32(response[16:20]),
+	}
+
+	for i := 20; i+6 <= len(response); i += 6 {
+		ip, _ := netip.AddrFromSlice(response[i : i+4])
+		port := binary.BigEndian.Uint16(response[i+4 : i+6])
+
+		if port != 0 && ip.IsValid() && !ip.IsUnspecified() {
+			result.Peers = append(result.Peers, netip.AddrPortFrom(ip, port))
+		}
+	}
+
+	return result, nil
 }

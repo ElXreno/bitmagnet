@@ -50,6 +50,8 @@ type Result struct {
 	DialsTotal     prometheus.Collector `group:"prometheus_collectors"`
 	StageGauge     prometheus.Collector `group:"prometheus_collectors"`
 	ProbeTotal     prometheus.Collector `group:"prometheus_collectors"`
+	SwarmTotal     prometheus.Collector `group:"prometheus_collectors"`
+	PeerDialTotal  prometheus.Collector `group:"prometheus_collectors"`
 	LookupQueries  prometheus.Collector `group:"prometheus_collectors"`
 	ClassTotal     prometheus.Collector `group:"prometheus_collectors"`
 	TrackerPackets prometheus.Collector `group:"prometheus_collectors"`
@@ -99,6 +101,18 @@ func New(params Params) Result {
 		Name:      "peer_probe_total",
 		Help:      "Meta info dials by earlier failure of the address, DHT ping result and dial outcome.",
 	}, []string{"prev", "ping", "dial"})
+	swarmTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bitmagnet",
+		Subsystem: "dht_crawler",
+		Name:      "swarm_total",
+		Help:      "Info hashes that reached the meta info stage, by the DHT versions of their peers and the outcome.",
+	}, []string{"class", "outcome"})
+	peerDialTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bitmagnet",
+		Subsystem: "dht_crawler",
+		Name:      "peer_dial_total",
+		Help:      "Meta info dials by the DHT version class of the peer and the result.",
+	}, []string{"node", "result"})
 	dialsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "bitmagnet",
 		Subsystem: "dht_crawler",
@@ -193,6 +207,8 @@ func New(params Params) Result {
 						dialsTotal:    dialsTotal,
 						stageGauge:    stageGauge,
 						probeTotal:    probeTotal,
+						swarmTotal:    swarmTotal,
+						peerDialTotal: peerDialTotal,
 						lookupQueries: lookupQueries,
 						classTotal:    classTotal,
 						trackers:      trackers,
@@ -279,6 +295,8 @@ func New(params Params) Result {
 		DialsTotal:       dialsTotal,
 		StageGauge:       stageGauge,
 		ProbeTotal:       probeTotal,
+		SwarmTotal:       swarmTotal,
+		PeerDialTotal:    peerDialTotal,
 		LookupQueries:    lookupQueries,
 		ClassTotal:       classTotal,
 		TrackerPackets:   trackerMetrics.packets,

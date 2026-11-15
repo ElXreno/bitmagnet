@@ -12,6 +12,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
+	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 )
 
@@ -48,11 +49,11 @@ func (f versionClient) Ping(_ context.Context, addr netip.AddrPort) (client.Ping
 	return client.PingResult{ClientID: version}, nil
 }
 
-func counted(t *testing.T, c *crawler, source string, stage string) float64 {
+func counted(t *testing.T, vec *prometheus.CounterVec, labels ...string) float64 {
 	t.Helper()
 
 	m := &dto.Metric{}
-	if err := c.hashesTotal.WithLabelValues(source, stage).Write(m); err != nil {
+	if err := vec.WithLabelValues(labels...).Write(m); err != nil {
 		t.Fatal(err)
 	}
 
@@ -68,10 +69,10 @@ func TestSwarmClassFollowsTheNodeVersions(t *testing.T) {
 		versions map[netip.AddrPort]string
 		swarm    string
 	}{
-		"hint only": {map[netip.AddrPort]string{peers[0]: "LT\x01\x00", peers[1]: "LT\x01\x00"}, "swarm_hint_only"},
-		"mixed":     {map[netip.AddrPort]string{peers[0]: "LT\x01\x00", peers[1]: "LT\x02\x0b"}, "swarm_hint_mixed"},
-		"regular":   {map[netip.AddrPort]string{peers[0]: "UT\xb9\x1e", peers[1]: ""}, "swarm_regular"},
-		"silent":    {nil, "swarm_silent"},
+		"hint only": {map[netip.AddrPort]string{peers[0]: "LT\x01\x00", peers[1]: "LT\x01\x00"}, "hint_only"},
+		"mixed":     {map[netip.AddrPort]string{peers[0]: "LT\x01\x00", peers[1]: "LT\x02\x0b"}, "hint_mixed"},
+		"regular":   {map[netip.AddrPort]string{peers[0]: "UT\xb9\x1e", peers[1]: ""}, "regular"},
+		"silent":    {nil, "silent"},
 	} {
 		c := newTestCrawler(nil, nil)
 		c.client = versionClient{versions: test.versions}
@@ -82,12 +83,12 @@ func TestSwarmClassFollowsTheNodeVersions(t *testing.T) {
 			t.Fatalf("%s: want errClosedSwarm, got %v", name, err)
 		}
 
-		if got := counted(t, c, test.swarm, "closed_swarm"); got != 1 {
+		if got := counted(t, c.swarmTotal, test.swarm, "closed_swarm"); got != 1 {
 			t.Errorf("%s: want one closed swarm counted as %s, got %v", name, test.swarm, got)
 		}
 
-		if test.swarm == "swarm_hint_only" {
-			if got := counted(t, c, "dial_"+implClosedHint, "closed_network_peer"); got != 2 {
+		if test.swarm == "hint_only" {
+			if got := counted(t, c.peerDialTotal, implClosedHint, "closed_network_peer"); got != 2 {
 				t.Errorf("%s: want two dials to hinted peers, got %v", name, got)
 			}
 

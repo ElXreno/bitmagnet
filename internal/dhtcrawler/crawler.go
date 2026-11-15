@@ -40,6 +40,8 @@ type crawler struct {
 	dialsTotal                   *prometheus.CounterVec
 	stageGauge                   *prometheus.GaugeVec
 	probeTotal                   *prometheus.CounterVec
+	swarmTotal                   *prometheus.CounterVec
+	peerDialTotal                *prometheus.CounterVec
 	lookupQueries                *prometheus.HistogramVec
 	classTotal                   *prometheus.CounterVec
 	deadPeers                    *ignoreFilter

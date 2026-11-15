@@ -206,15 +206,19 @@ func (c *crawler) doRequestMetaInfo(
 
 	candidates = append(candidates, unanswered...)
 
-	swarm := "swarm_silent"
+	swarm := "silent"
 
 	switch {
 	case hinted > 0 && regular == 0:
-		swarm = "swarm_hint_only"
+		swarm = "hint_only"
 	case hinted > 0:
-		swarm = "swarm_hint_mixed"
+		swarm = "hint_mixed"
 	case regular > 0:
-		swarm = "swarm_regular"
+		swarm = "regular"
+	}
+
+	countSwarm := func(outcome string) {
+		c.swarmTotal.With(prometheus.Labels{"class": swarm, "outcome": outcome}).Inc()
 	}
 
 	results := make(chan dialResult, len(candidates))
@@ -274,7 +278,7 @@ func (c *crawler) doRequestMetaInfo(
 		}
 
 		c.dialsTotal.With(prometheus.Labels{"source": source, "result": result}).Inc()
-		c.countHash("dial_"+r.impl, result, 1)
+		c.peerDialTotal.With(prometheus.Labels{"node": r.impl, "result": result}).Inc()
 
 		if r.err != nil {
 			errs = append(errs, r.err)
@@ -297,7 +301,7 @@ func (c *crawler) doRequestMetaInfo(
 			return metainforequester.Response{}, errors.Join(errBanned, banErr)
 		}
 
-		c.countHash(swarm, stageMetaInfoOK, 1)
+		countSwarm(stageMetaInfoOK)
 
 		if c.family(r.addr.Addr()) == c.v6 {
 			c.countHash(source, stageMetaInfoOK+"6", 1)
@@ -307,18 +311,18 @@ func (c *crawler) doRequestMetaInfo(
 	}
 
 	if len(errs) == 0 {
-		c.countHash(swarm, "no_candidates", 1)
+		countSwarm("no_candidates")
 
 		return metainforequester.Response{}, errNoCandidates
 	}
 
 	if closedPeers > 0 {
-		c.countHash(swarm, "closed_swarm", 1)
+		countSwarm("closed_swarm")
 
 		return metainforequester.Response{}, errors.Join(errClosedSwarm, errors.Join(errs...))
 	}
 
-	c.countHash(swarm, stageMetaInfoFail, 1)
+	countSwarm(stageMetaInfoFail)
 
 	return metainforequester.Response{}, errors.Join(errs...)
 }

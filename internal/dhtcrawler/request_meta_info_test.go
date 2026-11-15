@@ -59,6 +59,8 @@ func newTestCrawler(alive map[netip.AddrPort]bool, good map[netip.AddrPort]bool)
 		classTotal:        prometheus.NewCounterVec(prometheus.CounterOpts{Name: "class"}, []string{"family", "class", "stage"}),
 		probeTotal:        prometheus.NewCounterVec(prometheus.CounterOpts{Name: "probe"}, []string{"prev", "ping", "dial"}),
 		dialsTotal:        prometheus.NewCounterVec(prometheus.CounterOpts{Name: "dials"}, []string{"source", "result"}),
+		swarmTotal:        prometheus.NewCounterVec(prometheus.CounterOpts{Name: "swarm"}, []string{"class", "outcome"}),
+		peerDialTotal:     prometheus.NewCounterVec(prometheus.CounterOpts{Name: "peer_dial"}, []string{"node", "result"}),
 	}
 }
 

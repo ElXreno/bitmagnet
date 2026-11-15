@@ -21,6 +21,12 @@ func TestPeer(t *testing.T) {
 		"TIX0325-abcdefghijkl": "tixati",
 		"A2-1-37-0-abcdefghij": "aria2",
 		"-ZZ0000-abcdefghijkl": Other,
+		"-XF9990-abcdefghijkl": "xfplay",
+		"-BN0001-abcdefghijkl": "baidu-netdisk",
+		"-BL246326abcdefghijk": "bitlord",
+		"-SD0100-abcdefghijkl": "xunlei",
+		"aria2-abcdefghijklmn": "aria2",
+		"QVOD0054abcdefghijkl": "qvod",
 		"abcdefghijklmnopqrst": Other,
 	} {
 		if got := Peer(id(peerID)); got != want {

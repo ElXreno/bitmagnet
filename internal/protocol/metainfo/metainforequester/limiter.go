@@ -63,7 +63,7 @@ var peerClientTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: namespace,
 	Subsystem: subsystem,
 	Name:      "peer_client_total",
-	Help:      "A counter of peers by BitTorrent client, at the handshake and after a complete meta info fetch.",
+	Help:      "A counter of peers by BitTorrent client: every handshake, then the one outcome it ended with.",
 }, []string{"client", "stage"})
 
 var peerExtensionTotal = prometheus.NewCounterVec(prometheus.CounterOpts{

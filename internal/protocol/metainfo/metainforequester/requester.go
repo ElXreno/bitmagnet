@@ -183,28 +183,55 @@ func (r requester) request(
 	}
 
 	peerClient := clientid.Peer([20]byte(hsInfo.PeerID))
+	peerVersion := ""
+	outcome := func(stage string) {
+		peerClientTotal.With(prometheus.Labels{"client": peerClient, "stage": stage}).Inc()
+		dumpPeerID(addr, infoHash, hsInfo, peerClient, stage, peerVersion)
+	}
+
 	peerClientTotal.With(prometheus.Labels{"client": peerClient, "stage": "handshake"}).Inc()
 
-	metadataSize, utMetadata, exHandshakeErr := exHandshake(rw)
+	handshake, exHandshakeErr := readExHandshake(rw)
 	if exHandshakeErr != nil {
+		outcome("no_ext_handshake")
+
 		return Response{}, exHandshakeErr
 	}
 
+	peerVersion = handshake.V
+
+	metadataSize, utMetadata, offerErr := handshake.metadata()
+	if offerErr != nil {
+		if errors.Is(offerErr, errNoMetadataSize) {
+			outcome("no_metadata_size")
+		} else {
+			outcome("no_ut_metadata")
+		}
+
+		return Response{}, offerErr
+	}
+
 	if requestAllPiecesErr := requestAllPieces(rw, metadataSize, utMetadata); requestAllPiecesErr != nil {
+		outcome("pieces_failed")
+
 		return Response{}, requestAllPiecesErr
 	}
 
 	pieces, readAllPiecesErr := readAllPieces(rw, metadataSize)
 	if readAllPiecesErr != nil {
+		outcome("pieces_failed")
+
 		return Response{}, readAllPiecesErr
 	}
 
 	parsed, parseErr := metainfo.ParseMetaInfoBytes(infoHash, pieces)
 	if parseErr != nil {
+		outcome("bad_metainfo")
+
 		return Response{}, parseErr
 	}
 
-	peerClientTotal.With(prometheus.Labels{"client": peerClient, "stage": "metainfo"}).Inc()
+	outcome("metainfo")
 
 	return Response{
 		HandshakeInfo: hsInfo,
@@ -317,8 +344,26 @@ func btHandshake(rw io.ReadWriter, infoHash protocol.ID, clientID protocol.ID) (
 }
 
 type rootDict struct {
-	M            mDict `bencode:"m"`
-	MetadataSize int   `bencode:"metadata_size"`
+	M            mDict  `bencode:"m"`
+	MetadataSize int    `bencode:"metadata_size"`
+	V            string `bencode:"v,ignore_unmarshal_type_error"`
+}
+
+var (
+	errNoMetadataSize = errors.New("metadata too big or its size is less than or equal zero")
+	errNoUTMetadata   = errors.New("ut_metadata is not an uint8")
+)
+
+func (d *rootDict) metadata() (metadataSize uint, utMetadata uint8, err error) {
+	if 0 >= d.MetadataSize || d.MetadataSize >= maxMetadataSize {
+		return 0, 0, errNoMetadataSize
+	}
+
+	if 0 >= d.M.UTMetadata || d.M.UTMetadata >= 255 {
+		return 0, 0, errNoUTMetadata
+	}
+
+	return uint(d.MetadataSize), uint8(d.M.UTMetadata), nil
 }
 
 type mDict struct {
@@ -332,46 +377,44 @@ type extDict struct {
 	Piece   int `bencode:"piece"`
 }
 
-const maxMetadataSize = 10 * 1024 * 1024
+const (
+	maxMetadataSize   = 10 * 1024 * 1024
+	metadataPieceSize = 16 * 1024
+)
 
 func exHandshake(rw io.ReadWriter) (metadataSize uint, utMetadata uint8, err error) {
+	handshake, handshakeErr := readExHandshake(rw)
+	if handshakeErr != nil {
+		return 0, 0, handshakeErr
+	}
+
+	return handshake.metadata()
+}
+
+func readExHandshake(rw io.ReadWriter) (*rootDict, error) {
 	if !pipelinedHandshake {
 		if _, writeErr := rw.Write([]byte(extendedHandshake)); writeErr != nil {
-			err = writeErr
-			return
+			return nil, writeErr
 		}
 	}
 
 	rExMessage, readErr := readExMessage(rw)
 	if readErr != nil {
-		err = readErr
-		return
+		return nil, readErr
 	}
 	// Extension Handshake has the Extension Message id = 0x00
 	if rExMessage[1] != 0 {
-		err = errors.New("first extension message is not an extension handshake")
-		return
+		return nil, errors.New("first extension message is not an extension handshake")
 	}
 
 	rRootDict := new(rootDict)
 	if unmarshalErr := bencode.Unmarshal(rExMessage[2:], rRootDict); unmarshalErr != nil {
-		err = unmarshalErr
-		return
+		return nil, unmarshalErr
 	}
 
 	countPeerExtensions(rRootDict)
 
-	if 0 >= rRootDict.MetadataSize || rRootDict.MetadataSize >= maxMetadataSize {
-		err = errors.New("metadata too big or its size is less than or equal zero")
-		return
-	}
-
-	if 0 >= rRootDict.M.UTMetadata || rRootDict.M.UTMetadata >= 255 {
-		err = errors.New("ut_metadata is not an uint8")
-		return
-	}
-
-	return uint(rRootDict.MetadataSize), uint8(rRootDict.M.UTMetadata), nil
+	return rRootDict, nil
 }
 
 func requestAllPieces(w io.Writer, metadataSize uint, utMetadata uint8) error {
@@ -450,10 +493,16 @@ func readAllPieces(r io.Reader, metadataSize uint) ([]byte, error) {
 			}
 
 			piece := rExtDict.Piece
-			copy(
-				metadataBytes[piece*int(math.Pow(2, 14)):piece*int(math.Pow(2, 14))+len(metadataPiece)],
-				metadataPiece,
-			)
+			if piece < 0 || uint(piece) >= (metadataSize+metadataPieceSize-1)/metadataPieceSize {
+				return nil, errors.New("piece index out of range")
+			}
+
+			start := uint(piece) * metadataPieceSize
+			if start+uint(len(metadataPiece)) > metadataSize {
+				return nil, errors.New("piece exceeds the metadata size")
+			}
+
+			copy(metadataBytes[start:], metadataPiece)
 		}
 	}
 

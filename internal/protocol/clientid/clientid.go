@@ -7,42 +7,17 @@ const (
 	Bitmagnet = "bitmagnet"
 )
 
-var peerCodes = map[string]string{
-	"7T": "atorrent",
-	"AG": "ares",
-	"AZ": "vuze",
-	"BC": "bitcomet",
-	"BE": "bittorrent-sdk",
-	"BI": "biglybt",
-	"BL": "bitlord",
-	"BM": Bitmagnet,
-	"BT": "bittorrent",
-	"DE": "deluge",
-	"FD": "free-download-manager",
-	"FG": "flashget",
-	"FL": "folx",
-	"FW": "frostwire",
-	"GT": "anacrolix",
-	"KT": "ktorrent",
-	"LT": "libtorrent",
-	"MG": "mediaget",
-	"PI": "picotorrent",
-	"QD": "qqdownload",
-	"SD": "xunlei",
-	"SP": "bitspirit",
-	"TL": "tribler",
-	"TR": "transmission",
-	"TS": "torrentstorm",
-	"UM": "utorrent-mac",
-	"UT": "utorrent",
-	"UW": "utorrent-web",
-	"WD": "webtorrent",
-	"WW": "webtorrent",
-	"XL": "xunlei",
-	"ZO": "zona",
-	"lt": "rtorrent",
-	"qB": "qbittorrent",
-	"tT": "ttorrent",
+var peerPrefixes = []struct{ prefix, name string }{
+	{"TIX", "tixati"},
+	{"A2-", "aria2"},
+	{"aria2-", "aria2"},
+	{"exbc", "bitcomet"},
+	{"FD6", "free-download-manager"},
+	{"QVOD", "qvod"},
+	{"XBT", "xbt"},
+	{"DNA", "bittorrent-dna"},
+	{"LIME", "limewire"},
+	{"btpd", "btpd"},
 }
 
 var nodeCodes = map[string]string{
@@ -56,19 +31,22 @@ var nodeCodes = map[string]string{
 
 // Peer names the client of a peer id (BEP 20 conventions).
 func Peer(id [20]byte) string {
-	switch {
-	case id[0] == '-' && id[7] == '-':
+	if id[0] == '-' {
 		if name, ok := peerCodes[string(id[1:3])]; ok {
 			return name
 		}
-	case id[0] == 'M' && id[2] == '-':
+
+		return Other
+	}
+
+	if id[0] == 'M' && id[2] == '-' {
 		return "mainline"
-	case string(id[:3]) == "TIX":
-		return "tixati"
-	case string(id[:3]) == "A2-":
-		return "aria2"
-	case string(id[:4]) == "exbc":
-		return "bitcomet"
+	}
+
+	for _, known := range peerPrefixes {
+		if string(id[:len(known.prefix)]) == known.prefix {
+			return known.name
+		}
 	}
 
 	return Other

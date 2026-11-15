@@ -88,13 +88,17 @@ func (c *crawler) start() {
 		go c.getNodesForSampleInfoHashes(ctx, f)
 		go c.getOldNodes(ctx, f)
 		go c.runNodePool(ctx, f)
+		go c.runRevisits(ctx, f)
 	}
 
 	if c.v6 != nil {
 		go c.runDiscoveredNodes6(ctx)
 	}
 
-	go c.runInfoHashTriage(ctx, "triage", c.infoHashTriage)
+	for range envInt("BITMAGNET_TRIAGE_WORKERS", 4) {
+		go c.runInfoHashTriage(ctx, "triage", c.infoHashTriage)
+	}
+
 	go c.runInfoHashTriage(ctx, "triage_inbound", c.inboundTriage)
 	go c.runInboundHashes(ctx)
 	go c.runGetPeers(ctx)

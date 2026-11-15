@@ -32,6 +32,10 @@ var (
 	lookupExtraAfterPeers = envInt("BITMAGNET_LOOKUP_EXTRA_AFTER_PEERS", 3)
 )
 
+func envIsOn(name string) bool {
+	return os.Getenv(name) != "off"
+}
+
 func envInt(name string, fallback int) int {
 	if v, err := strconv.Atoi(os.Getenv(name)); err == nil && v > 0 {
 		return v

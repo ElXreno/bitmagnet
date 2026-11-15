@@ -20,6 +20,7 @@ type nodeFamily struct {
 	sampledNodes             *ignoreFilter
 	nodePool                 *nodePool
 	discovered               chan ktable.Node
+	revisits                 *revisits
 }
 
 func newNodeFamily(suffix string, kTable ktable.Table, scalingFactor int, sampleConcurrency int) *nodeFamily {
@@ -41,6 +42,7 @@ func newNodeFamily(suffix string, kTable ktable.Table, scalingFactor int, sample
 			bloom: boom.NewStableBloomFilter(20_000_000, 2, 0.001),
 		},
 		nodePool: newNodePool(),
+		revisits: newRevisits(),
 	}
 }
 

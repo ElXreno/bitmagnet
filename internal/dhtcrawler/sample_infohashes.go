@@ -26,10 +26,18 @@ func (c *crawler) getNodesForSampleInfoHashes(ctx context.Context, f *nodeFamily
 }
 
 func (c *crawler) runSampleInfoHashes(ctx context.Context, f *nodeFamily) {
+	_ = f.nodesForSampleInfoHashes.Run(ctx, func(n ktable.Node) {
+		c.sampleNode(ctx, f, n)
+	})
+}
+
+func (c *crawler) sampleNode(ctx context.Context, f *nodeFamily, n ktable.Node) {
 	source := f.sourceSample()
 
-	_ = f.nodesForSampleInfoHashes.Run(ctx, func(n ktable.Node) {
+	{
 		if !n.IsSampleInfoHashesCandidate() {
+			f.revisits.forget(n.ID())
+
 			return
 		}
 
@@ -38,6 +46,7 @@ func (c *crawler) runSampleInfoHashes(ctx context.Context, f *nodeFamily) {
 			f.kTable.BatchCommand(
 				ktable.DropNode{ID: n.ID(), Reason: fmt.Errorf("sample_infohashes failed: %w", err)},
 			)
+			f.revisits.forget(n.ID())
 
 			return
 		}
@@ -55,6 +64,7 @@ func (c *crawler) runSampleInfoHashes(ctx context.Context, f *nodeFamily) {
 		}
 
 		c.countSampledNode(f, n.ID(), res.Num, res.Interval, len(res.Samples), len(discoveredHashes))
+		c.countHash("sample_nodes"+f.suffix, "revisit_"+f.revisits.plan(n, res.Num, len(res.Samples), len(discoveredHashes)), 1)
 		c.countHash(source, stageDiscovered, len(discoveredHashes))
 		c.countHash(source, stageDuplicate, len(res.Samples)-len(discoveredHashes))
 
@@ -101,7 +111,7 @@ func (c *crawler) runSampleInfoHashes(ctx context.Context, f *nodeFamily) {
 				}
 			}()
 		}
-	})
+	}
 }
 
 // countSampledNode records how wide and how deep sampling reaches: whether the node was seen before in this

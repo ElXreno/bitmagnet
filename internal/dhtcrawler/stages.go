@@ -25,6 +25,10 @@ func (c *crawler) reportStages(ctx context.Context) {
 		stages["ping"+f.suffix] = f.nodesForPing
 		stages["find_node"+f.suffix] = f.nodesForFindNode
 		stages["sample_infohashes"+f.suffix] = f.nodesForSampleInfoHashes
+
+		if f.revisits != nil {
+			stages["revisit"+f.suffix] = f.revisits.stage
+		}
 	}
 
 	for {

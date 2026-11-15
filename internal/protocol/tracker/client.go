@@ -308,11 +308,54 @@ func (c *Client) Announce(
 	hash protocol.ID,
 	params AnnounceParams,
 ) (AnnounceResult, error) {
+	response, addr, connectionID, err := c.started(ctx, index, hash, params)
+	if err != nil {
+		return AnnounceResult{}, err
+	}
+
+	_, _ = c.conn.WriteToUDP(
+		c.announceRequest(connectionID, newTransactionID(), hash, params, eventStopped, 0), addr)
+
+	return c.announceResult(response)
+}
+
+func (c *Client) AnnounceStart(
+	ctx context.Context,
+	index int,
+	hash protocol.ID,
+	params AnnounceParams,
+) (AnnounceResult, error) {
+	response, _, _, err := c.started(ctx, index, hash, params)
+	if err != nil {
+		return AnnounceResult{}, err
+	}
+
+	return c.announceResult(response)
+}
+
+func (c *Client) AnnounceStop(ctx context.Context, index int, hash protocol.ID, params AnnounceParams) error {
+	addr, connectionID, err := c.connection(ctx, c.trackers[index])
+	if err != nil {
+		return err
+	}
+
+	_, err = c.conn.WriteToUDP(
+		c.announceRequest(connectionID, newTransactionID(), hash, params, eventStopped, 0), addr)
+
+	return err
+}
+
+func (c *Client) started(
+	ctx context.Context,
+	index int,
+	hash protocol.ID,
+	params AnnounceParams,
+) ([]byte, *net.UDPAddr, uint64, error) {
 	t := c.trackers[index]
 
 	addr, connectionID, err := c.connection(ctx, t)
 	if err != nil {
-		return AnnounceResult{}, err
+		return nil, nil, 0, err
 	}
 
 	transactionID := newTransactionID()
@@ -328,12 +371,13 @@ func (c *Client) Announce(
 			t.mu.Unlock()
 		}
 
-		return AnnounceResult{}, err
+		return nil, nil, 0, err
 	}
 
-	_, _ = c.conn.WriteToUDP(
-		c.announceRequest(connectionID, newTransactionID(), hash, params, eventStopped, 0), addr)
+	return response, addr, connectionID, nil
+}
 
+func (c *Client) announceResult(response []byte) (AnnounceResult, error) {
 	entry := 6
 	if c.network == "udp6" {
 		entry = 18

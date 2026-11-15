@@ -19,7 +19,14 @@ func fakeTracker(t *testing.T, refuse bool) string {
 	return addr
 }
 
-func fakeTrackerWithEvents(t *testing.T, refuse bool) (string, chan uint32) {
+type seenAnnounce struct {
+	event uint32
+	hash  protocol.ID
+	left  uint64
+	port  uint16
+}
+
+func fakeTrackerWithEvents(t *testing.T, refuse bool) (string, chan seenAnnounce) {
 	t.Helper()
 
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -31,7 +38,7 @@ func fakeTrackerWithEvents(t *testing.T, refuse bool) (string, chan uint32) {
 
 	const connectionID = 0x1122334455667788
 
-	events := make(chan uint32, 16)
+	events := make(chan seenAnnounce, 16)
 
 	go func() {
 		buffer := make([]byte, 2048)
@@ -58,7 +65,12 @@ func fakeTrackerWithEvents(t *testing.T, refuse bool) (string, chan uint32) {
 				_, _ = conn.WriteToUDP(response, from)
 			case action == actionAnnounce && binary.BigEndian.Uint64(packet[0:8]) == connectionID && n == 98:
 				event := binary.BigEndian.Uint32(packet[80:84])
-				events <- event
+				events <- seenAnnounce{
+					event: event,
+					hash:  protocol.ID(packet[16:36]),
+					left:  binary.BigEndian.Uint64(packet[64:72]),
+					port:  binary.BigEndian.Uint16(packet[96:98]),
+				}
 
 				if event != eventStarted {
 					continue
@@ -189,11 +201,90 @@ func TestAnnounce(t *testing.T) {
 	for _, want := range []uint32{eventStarted, eventStopped} {
 		select {
 		case got := <-events:
-			if got != want {
-				t.Fatalf("want event %d, got %d", want, got)
+			if got.event != want {
+				t.Fatalf("want event %d, got %d", want, got.event)
 			}
 		case <-time.After(time.Second):
 			t.Fatalf("the tracker never saw event %d", want)
 		}
+	}
+}
+
+func TestAnnounceStartAndStop(t *testing.T) {
+	t.Parallel()
+
+	addr, events := fakeTrackerWithEvents(t, false)
+
+	client, err := NewClient("udp4", []string{addr}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = client.Close() })
+
+	hash := protocol.ID{9}
+	params := AnnounceParams{Port: 3334}
+
+	result, err := client.AnnounceStart(context.Background(), 0, hash, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result.Seeders != 7 || result.Leechers != 3 || len(result.Peers) != 1 {
+		t.Fatalf("got %+v", result)
+	}
+
+	select {
+	case got := <-events:
+		if got.event != eventStarted || got.hash != hash || got.port != 3334 || got.left == 0 {
+			t.Fatalf("want a started announce as a leecher on port 3334, got %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the tracker never saw the started event")
+	}
+
+	select {
+	case got := <-events:
+		t.Fatalf("AnnounceStart must stay in the swarm, the tracker saw %+v", got)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	if err := client.AnnounceStop(context.Background(), 0, hash, params); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case got := <-events:
+		if got.event != eventStopped || got.hash != hash || got.port != 3334 {
+			t.Fatalf("want a stopped announce for the same hash and port, got %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the tracker never saw the stopped event")
+	}
+}
+
+func TestAnnounceStartErrors(t *testing.T) {
+	t.Parallel()
+
+	silent, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = silent.Close() })
+
+	client, err := NewClient("udp4", []string{silent.LocalAddr().String()}, 200*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = client.Close() })
+
+	if _, startErr := client.AnnounceStart(context.Background(), 0, protocol.ID{1}, AnnounceParams{}); !errors.Is(startErr, ErrTimeout) {
+		t.Fatalf("silent tracker: want ErrTimeout from AnnounceStart, got %v", startErr)
+	}
+
+	if stopErr := client.AnnounceStop(context.Background(), 0, protocol.ID{1}, AnnounceParams{}); !errors.Is(stopErr, ErrTimeout) {
+		t.Fatalf("silent tracker: want ErrTimeout from AnnounceStop, got %v", stopErr)
 	}
 }

@@ -3,6 +3,7 @@ package dhtcrawler
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/netip"
 	"os"
 	"strconv"
@@ -88,6 +89,7 @@ func (c *crawler) lookupPeers(
 	inflight := 0
 	afterFirstPeers := 0
 	completed := 0
+	limited := 0
 
 	var responded []protocol.ID
 
@@ -95,9 +97,10 @@ func (c *crawler) lookupPeers(
 	stop := false
 
 	type lookupResult struct {
-		res  client.GetPeersResult
-		ok   bool
-		node *lookupNode
+		res     client.GetPeersResult
+		ok      bool
+		limited bool
+		node    *lookupNode
 	}
 
 	results := make(chan lookupResult, lookupMaxQueries)
@@ -129,7 +132,7 @@ func (c *crawler) lookupPeers(
 				defer queryCancel()
 
 				res, err := c.client.GetPeers(queryCtx, addr, hash)
-				results <- lookupResult{res: res, ok: err == nil, node: node}
+				results <- lookupResult{res: res, ok: err == nil, limited: errors.Is(err, server.ErrLimited), node: node}
 			}(best)
 		}
 
@@ -139,6 +142,14 @@ func (c *crawler) lookupPeers(
 
 		r := <-results
 		inflight--
+
+		if r.limited {
+			queries--
+			limited++
+
+			continue
+		}
+
 		completed++
 
 		if len(peers) > 0 {
@@ -175,6 +186,7 @@ func (c *crawler) lookupPeers(
 	}
 
 	c.countHash(source, stageLookupQueries, queries)
+	c.countHash(source, "lookup_limited", limited)
 
 	if len(peers) > 0 {
 		c.lookupQueries.With(prometheus.Labels{"source": source, "result": "found"}).Observe(float64(firstPeersAt))

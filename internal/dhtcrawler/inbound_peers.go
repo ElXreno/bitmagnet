@@ -60,6 +60,7 @@ type inboundConfig struct {
 	dhtPPS    int
 	dhtMax    int
 	dhtTTL    time.Duration
+	dhtSeeds  string
 }
 
 func inboundConfigFromEnv() (inboundConfig, bool) {
@@ -89,7 +90,17 @@ func inboundConfigFromEnv() (inboundConfig, bool) {
 		dhtPPS:    envInt("BITMAGNET_INBOUND_DHT_PPS", 150),
 		dhtMax:    envInt("BITMAGNET_INBOUND_DHT_HASHES", 300_000),
 		dhtTTL:    time.Duration(envInt("BITMAGNET_INBOUND_DHT_SECONDS", 2700)) * time.Second,
+		dhtSeeds:  dhtSeedsFromEnv(),
 	}, true
+}
+
+func dhtSeedsFromEnv() string {
+	switch mode := os.Getenv("BITMAGNET_INBOUND_DHT_SEEDS"); mode {
+	case dhtSeedsOn, "off":
+		return mode
+	default:
+		return dhtSeedsMeasure
+	}
 }
 
 type inboundEntry struct {
@@ -109,6 +120,7 @@ type inboundEntry struct {
 	late      bool
 	dht       bool
 	done      bool
+	class     uint8
 }
 
 type inboundHeap []*inboundEntry
@@ -442,6 +454,12 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 	entry, kind := p.claim(in.InfoHash, in.Encrypted)
 	c.countHash(sourceInboundPeer, kind, 1)
 
+	scraped := ""
+	if entry != nil && entry.class != dhtClassNone {
+		scraped = "_dht" + dhtClassNames[entry.class]
+		c.countHash(sourceInboundPeer, stageInboundDHTConn+dhtClassNames[entry.class], 1)
+	}
+
 	if entry == nil {
 		if kind == stageInboundUnknownHash {
 			switch {
@@ -481,6 +499,10 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 	case errors.Is(err, metainforequester.ErrPeerHasNoMetaInfo):
 		c.countHash(sourceInboundPeer, stageInboundNoMetaInfo, 1)
 
+		if scraped != "" {
+			c.countHash(sourceInboundPeer, stageInboundNoMetaInfo+scraped, 1)
+		}
+
 		return "no_metadata_size"
 	case errors.Is(err, metainforequester.ErrIncomingBudget):
 		c.countHash(sourceInboundPeer, stageInboundFetchFailed, 1)
@@ -518,6 +540,10 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 	}
 
 	c.countHash(sourceInboundPeer, stageMetaInfoOK, 1)
+
+	if scraped != "" {
+		c.countHash(sourceInboundPeer, stageMetaInfoOK+scraped, 1)
+	}
 
 	if waited := int(p.now().Sub(entry.since).Seconds()); entry.dht {
 		c.countHash(sourceInboundPeer, stageMetaInfoOK+"_dht", 1)
@@ -910,6 +936,7 @@ func (p *inboundPeers) claim(hash protocol.ID, encrypted bool) (*inboundEntry, s
 				req:   held.request(),
 				since: time.Unix(int64(held.since), 0),
 				dht:   true,
+				class: held.class,
 			}, stageInboundDHTConn
 		}
 	}

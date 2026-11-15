@@ -23,6 +23,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/blocking"
 	"github.com/bitmagnet-io/bitmagnet/internal/concurrency"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
@@ -1016,6 +1017,8 @@ type announcingClient struct {
 	client.Client
 	mu        sync.Mutex
 	nodes     map[netip.AddrPort]protocol.ID
+	swarms    map[protocol.ID]string
+	scrapes   []dhtAnnounce
 	values    []netip.AddrPort
 	refusing  netip.AddrPort
 	announces []dhtAnnounce
@@ -1045,6 +1048,30 @@ func (a *announcingClient) AnnouncePeer(
 	}
 
 	return nil
+}
+
+func (a *announcingClient) GetPeersScrape(
+	_ context.Context, addr netip.AddrPort, hash protocol.ID,
+) (client.GetPeersScrapeResult, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.scrapes = append(a.scrapes, dhtAnnounce{addr: addr, hash: hash})
+
+	var seeds, peers dht.ScrapeBloomFilter
+
+	switch a.swarms[hash] {
+	case "seeded":
+		seeds.AddIP(net.IPv4(192, 0, 2, 50))
+		peers.AddIP(net.IPv4(192, 0, 2, 51))
+	case "leechers":
+		peers.AddIP(net.IPv4(192, 0, 2, 51))
+	case "empty":
+	default:
+		return client.GetPeersScrapeResult{}, errors.New("missing bloom filter in scrape response")
+	}
+
+	return client.GetPeersScrapeResult{BfSeeders: *seeds.ToBloomFilter(), BfPeers: *peers.ToBloomFilter()}, nil
 }
 
 func (a *announcingClient) seen() []dhtAnnounce {
@@ -1243,6 +1270,7 @@ func TestInboundSwitchAndTrackerMembership(t *testing.T) {
 	t.Setenv("BITMAGNET_INBOUND_DHT_PPS", "")
 	t.Setenv("BITMAGNET_INBOUND_DHT_HASHES", "")
 	t.Setenv("BITMAGNET_INBOUND_DHT_SECONDS", "")
+	t.Setenv("BITMAGNET_INBOUND_DHT_SEEDS", "")
 	t.Setenv("BITMAGNET_INBOUND_EXTRA_MIN_SEEDERS", "")
 	t.Setenv("BITMAGNET_INBOUND_EXTRA_TRACKERS", "")
 
@@ -1363,6 +1391,7 @@ func TestInboundSwitchAndTrackerMembership(t *testing.T) {
 	if got := c.inbound.config; got != (inboundConfig{
 		maxHashes: 60, hold: time.Second, maxConns: 3, maxPerIP: 8, lateMax: 50_000, lateTTL: 15 * time.Minute,
 		extraMin: 2, extraMax: 3, stateFile: state, dhtPPS: 150, dhtMax: 300_000, dhtTTL: 45 * time.Minute,
+		dhtSeeds: dhtSeedsMeasure,
 	}) {
 		t.Fatalf("want room for two trackers announcing 30 hashes a second for the hold of one second, got %+v", got)
 	}
@@ -1963,4 +1992,143 @@ func TestTokensTravelWithTheRequest(t *testing.T) {
 	if len(tokens) != 1 || tokens[0].addr != node {
 		t.Fatalf("want the tokens of the lookup, got %+v", tokens)
 	}
+}
+
+func TestDHTJoinBySwarmSeeds(t *testing.T) {
+	t.Parallel()
+
+	metadata, seeded := inboundMetadata(t, "scraped")
+	leechers, empty, silent := protocol.ID{seeded[0], 1}, protocol.ID{seeded[0], 2}, protocol.ID{seeded[0], 3}
+
+	start := func(mode string, state string) (inboundTest, *announcingClient) {
+		cl := &announcingClient{
+			nodes:  make(map[netip.AddrPort]protocol.ID),
+			swarms: map[protocol.ID]string{seeded: "seeded", leechers: "leechers", empty: "empty"},
+		}
+		c := newFamilyTestCrawler(false, cl)
+
+		return startInboundTest(t, c, inboundConfig{
+			maxHashes: 10, hold: time.Minute, maxConns: 8, stateFile: state,
+			dht: true, dhtPPS: 100, dhtMax: 10, dhtTTL: 10 * time.Minute, dhtSeeds: mode,
+		}, offlineScraper(1)), cl
+	}
+
+	request := func(hash protocol.ID) nodeHasPeersForHash {
+		req := sampleRequest(hash)
+
+		for n := byte(1); n <= 4; n++ {
+			req.tokens = append(req.tokens, lookupToken{
+				addr:     netip.AddrPortFrom(netip.AddrFrom4([4]byte{192, 0, 2, n}), 6881),
+				distance: protocol.ID{n},
+				token:    "t",
+			})
+		}
+
+		return req
+	}
+
+	joinAll := func(i inboundTest) {
+		for _, hash := range []protocol.ID{seeded, leechers, empty, silent} {
+			i.inbound.outgoingFailed(request(hash))
+		}
+	}
+
+	state := filepath.Join(t.TempDir(), "late.json")
+	i, cl := start(dhtSeedsMeasure, state)
+	count := func(stage string) float64 { return hashCount(t, i.crawler, sourceInboundPeer, stage) }
+
+	joinAll(i)
+	eventually(t, "every class joined while measuring", func() bool { return count("dht_joined") == 4 })
+
+	for _, class := range []string{"seeded", "leechers", "empty", "unknown"} {
+		if count("dht_scrape_"+class) != 1 || count("dht_joined_"+class) != 1 {
+			t.Fatalf("class %s: scraped %v, joined %v", class, count("dht_scrape_"+class), count("dht_joined_"+class))
+		}
+	}
+
+	cl.mu.Lock()
+	scrapes := append([]dhtAnnounce(nil), cl.scrapes...)
+	cl.mu.Unlock()
+
+	if len(scrapes) != 8 || count("dht_scrape_failed") != 2 {
+		t.Fatalf("want two scrape queries per hash and two unanswered ones, got %d", len(scrapes))
+	}
+
+	for _, scrape := range scrapes {
+		if last := scrape.addr.Addr().As4()[3]; last > inboundDHTScrapes {
+			t.Fatalf("scrape went to %s, not to one of the closest token holders", scrape.addr)
+		}
+	}
+
+	_, _ = peertest.Peer{InfoHash: leechers}.Dial(i.address())
+
+	eventually(t, "the peer without meta info", func() bool { return count("peer_no_metainfo_dht_leechers") == 1 })
+
+	if _, err := (peertest.Peer{InfoHash: seeded, Metadata: metadata}).Dial(i.address()); err != nil {
+		t.Fatal(err)
+	}
+
+	i.persisted(t)
+
+	for stage, want := range map[string]float64{
+		"dht_conn_seeded":                 1,
+		"dht_conn_leechers":               1,
+		stageMetaInfoOK + "_dht_seeded":   1,
+		"peer_no_metainfo_dht_leechers":   1,
+		stageMetaInfoOK + "_dht_leechers": 0,
+	} {
+		if got := count(stage); got != want {
+			t.Errorf("stage %s: want %v, got %v", stage, want, got)
+		}
+	}
+
+	i.inbound.leaveAll(0)
+
+	i, _ = start(dhtSeedsMeasure, state)
+
+	if class, held := dhtClassOf(i, leechers); !held || class != dhtClassLeechers {
+		t.Fatalf("the class must survive a restart, got %d", class)
+	}
+
+	i, cl = start(dhtSeedsOn, "")
+	joinAll(i)
+	eventually(t, "the join by seeds", func() bool {
+		return count("dht_joined") == 2 && count("dht_skipped_leechers") == 1 && count("dht_skipped_empty") == 1
+	})
+
+	for _, announce := range cl.seen() {
+		if announce.hash == leechers || announce.hash == empty {
+			t.Fatalf("a swarm without seeds was announced: %+v", announce)
+		}
+	}
+
+	_, seededHeld := dhtClassOf(i, seeded)
+	_, silentHeld := dhtClassOf(i, silent)
+
+	if !seededHeld || !silentHeld || i.inbound.dhtSize() != 2 {
+		t.Fatal("want the seeded and the unanswered swarm held")
+	}
+
+	i, cl = start("off", "")
+	joinAll(i)
+	eventually(t, "the join without a scrape", func() bool { return count("dht_joined") == 4 })
+
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+
+	if class, _ := dhtClassOf(i, seeded); len(cl.scrapes) != 0 || count("dht_joined_seeded") != 0 || class != dhtClassNone {
+		t.Fatal("with the switch off no scrape may go out")
+	}
+}
+
+func dhtClassOf(i inboundTest, hash protocol.ID) (uint8, bool) {
+	i.inbound.mu.Lock()
+	defer i.inbound.mu.Unlock()
+
+	held := i.inbound.dhtSet.get(hash)
+	if held == nil {
+		return 0, false
+	}
+
+	return held.class, true
 }

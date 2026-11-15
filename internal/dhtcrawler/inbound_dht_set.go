@@ -11,9 +11,19 @@ import (
 )
 
 const (
-	dhtHeldMagic      = "BMDHT01\n"
-	dhtHeldRecordSize = 20 + 4 + 1 + 18
+	dhtHeldMagic      = "BMDHT02\n"
+	dhtHeldRecordSize = 20 + 4 + 1 + 1 + 18
 )
+
+const (
+	dhtClassNone uint8 = iota
+	dhtClassSeeded
+	dhtClassLeechers
+	dhtClassEmpty
+	dhtClassUnknown
+)
+
+var dhtClassNames = [...]string{"", "_seeded", "_leechers", "_empty", "_unknown"}
 
 var dhtHeldOrigins = [...]string{"", sourceSample, sourceSample6, sourceSampleLookup, sourceSampleLookup6}
 
@@ -25,6 +35,7 @@ type dhtHeld struct {
 	origin uint8
 	active uint8
 	live   bool
+	class  uint8
 }
 
 func newDHTHeld(req nodeHasPeersForHash, since uint32) dhtHeld {
@@ -178,7 +189,7 @@ func (s *dhtHeldSet) encode() []byte {
 
 		data = append(data, held.hash[:]...)
 		data = binary.BigEndian.AppendUint32(data, held.since)
-		data = append(data, held.origin)
+		data = append(data, held.origin, held.class)
 		data = append(data, held.node[:]...)
 	}
 
@@ -205,13 +216,15 @@ func (s *dhtHeldSet) load(path string, now uint32) int {
 			hash:   protocol.ID(records[:20]),
 			since:  binary.BigEndian.Uint32(records[20:24]),
 			origin: records[24],
+			class:  records[25],
 			live:   true,
 		}
-		copy(held.node[:], records[25:])
+		copy(held.node[:], records[26:])
 
 		held.since = min(held.since, now)
 
-		if int(held.origin) >= len(dhtHeldOrigins) || held.since+s.ttl <= now {
+		if int(held.origin) >= len(dhtHeldOrigins) || int(held.class) >= len(dhtClassNames) ||
+			held.since+s.ttl <= now {
 			continue
 		}
 

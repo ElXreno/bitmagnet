@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/bitmagnet-io/bitmagnet/internal/bloom"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/server"
 	"golang.org/x/time/rate"
@@ -19,6 +20,10 @@ const (
 	inboundDHTNodes   = 8
 	inboundDHTLookups = 64
 	inboundDHTFile    = "inbound_dht_hashes.bin"
+	inboundDHTScrapes = 2
+
+	dhtSeedsMeasure = "measure"
+	dhtSeedsOn      = "on"
 )
 
 type inboundDHTTarget struct {
@@ -193,6 +198,19 @@ func (p *inboundPeers) joinDHT(ctx context.Context, req nodeHasPeersForHash) {
 		c.countHash(sourceInboundPeer, "dht_tokens_looked_up", 1)
 	}
 
+	class := dhtClassNone
+
+	if p.config.dhtSeeds == dhtSeedsMeasure || p.config.dhtSeeds == dhtSeedsOn {
+		class = p.scrapeClass(ctx, req.infoHash, tokens)
+		c.countHash(sourceInboundPeer, "dht_scrape"+dhtClassNames[class], 1)
+
+		if p.config.dhtSeeds == dhtSeedsOn && (class == dhtClassLeechers || class == dhtClassEmpty) {
+			c.countHash(sourceInboundPeer, "dht_skipped"+dhtClassNames[class], 1)
+
+			return
+		}
+	}
+
 	if p.announceTo(ctx, req.infoHash, tokens) == 0 {
 		c.countHash(sourceInboundPeer, "dht_join_failed", 1)
 
@@ -201,12 +219,74 @@ func (p *inboundPeers) joinDHT(ctx context.Context, req nodeHasPeersForHash) {
 
 	c.countHash(sourceInboundPeer, "dht_joined", 1)
 
+	if class != dhtClassNone {
+		c.countHash(sourceInboundPeer, "dht_joined"+dhtClassNames[class], 1)
+	}
+
+	held := newDHTHeld(req, uint32(p.now().Unix()))
+	held.class = class
+
 	p.mu.Lock()
-	_, evicted := p.dhtSet.add(newDHTHeld(req, uint32(p.now().Unix())))
+	_, evicted := p.dhtSet.add(held)
 	p.mu.Unlock()
 
 	if evicted {
 		c.countHash(sourceInboundPeer, "dht_evicted", 1)
+	}
+}
+
+// scrapeClass asks the closest token holders for the BEP 33 filters of the swarm: seeds, downloaders or nobody
+func (p *inboundPeers) scrapeClass(ctx context.Context, hash protocol.ID, tokens []lookupToken) uint8 {
+	closest := append([]lookupToken(nil), tokens...)
+	sort.SliceStable(closest, func(a, b int) bool {
+		return bytes.Compare(closest[a].distance[:], closest[b].distance[:]) < 0
+	})
+
+	closest = closest[:min(len(closest), inboundDHTScrapes)]
+
+	type answer struct {
+		seeds bloom.Filter
+		peers bloom.Filter
+		err   error
+	}
+
+	answers := make(chan answer, len(closest))
+
+	for _, node := range closest {
+		go func() {
+			queryCtx, cancel := context.WithTimeout(
+				server.WithMaxLimiterWait(ctx, lookupMaxLimiterWait), peerProbeTimeout)
+			defer cancel()
+
+			res, err := p.c.client.GetPeersScrape(queryCtx, node.addr, hash)
+			answers <- answer{seeds: res.BfSeeders, peers: res.BfPeers, err: err}
+		}()
+	}
+
+	answered, seeds, peers := 0, false, false
+
+	for range closest {
+		got := <-answers
+		if got.err != nil {
+			p.c.countHash(sourceInboundPeer, "dht_scrape_failed", 1)
+
+			continue
+		}
+
+		answered++
+		seeds = seeds || got.seeds.ApproximatedSize() > 0
+		peers = peers || got.peers.ApproximatedSize() > 0
+	}
+
+	switch {
+	case answered == 0:
+		return dhtClassUnknown
+	case seeds:
+		return dhtClassSeeded
+	case peers:
+		return dhtClassLeechers
+	default:
+		return dhtClassEmpty
 	}
 }
 

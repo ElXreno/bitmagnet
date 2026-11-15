@@ -26,7 +26,7 @@ type Result struct {
 }
 
 const (
-	nodesK  = 80
+	nodesK  = 320
 	hashesK = 80
 )
 

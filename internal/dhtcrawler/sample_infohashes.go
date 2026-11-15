@@ -10,7 +10,7 @@ import (
 
 func (c *crawler) getNodesForSampleInfoHashes(ctx context.Context) {
 	for {
-		peers := c.kTable.GetNodesForSampleInfoHashes(60)
+		peers := c.kTable.GetNodesForSampleInfoHashes(240)
 		for _, p := range peers {
 			select {
 			case <-ctx.Done():

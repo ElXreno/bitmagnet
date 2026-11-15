@@ -38,6 +38,9 @@ type requester struct {
 // ErrClosedNetworkPeer marks a failed fetch from a peer of a network that does not serve meta info.
 var ErrClosedNetworkPeer = errors.New("peer of a closed network")
 
+// ErrSelfPeer marks a handshake that carried our own peer id.
+var ErrSelfPeer = errors.New("peer is ourselves")
+
 type utpFallbackKey struct{}
 
 // WithUTPFallback lets requests made with the returned context retry over uTP when the TCP dial times out.
@@ -184,6 +187,10 @@ func (r requester) request(
 		}
 
 		return Response{}, btHandshakeErr
+	}
+
+	if hsInfo.PeerID == r.clientID {
+		return Response{}, ErrSelfPeer
 	}
 
 	peerClient := clientid.Peer([20]byte(hsInfo.PeerID))

@@ -45,6 +45,7 @@ type crawler struct {
 	lookupQueries                *prometheus.HistogramVec
 	classTotal                   *prometheus.CounterVec
 	deadPeers                    *ignoreFilter
+	selfPeers                    *selfPeers
 	pingCache                    *pingCache
 	trackers                     *trackerScraper
 	trackers6                    *trackerScraper

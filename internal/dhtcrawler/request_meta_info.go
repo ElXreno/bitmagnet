@@ -155,6 +155,7 @@ func (c *crawler) doRequestMetaInfo(
 		impl string
 	}
 
+	peers = c.selfPeers.without(peers)
 	probed := make(chan candidate, len(peers))
 
 	for _, p := range peers {
@@ -332,6 +333,11 @@ func (c *crawler) doRequestMetaInfo(
 
 		if r.err != nil {
 			errs = append(errs, r.err)
+
+			if errors.Is(r.err, metainforequester.ErrSelfPeer) {
+				c.selfPeers.add(r.addr)
+				c.countHash(source, "self_peer", 1)
+			}
 
 			if errors.Is(r.err, metainforequester.ErrClosedNetworkPeer) {
 				closedPeers++

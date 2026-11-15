@@ -113,6 +113,53 @@ func TestDoRequestMetaInfoSucceeds(t *testing.T) {
 	}
 }
 
+type selfRequester struct {
+	dials *int
+}
+
+func (s selfRequester) Request(context.Context, protocol.ID, netip.AddrPort) (metainforequester.Response, error) {
+	*s.dials++
+
+	return metainforequester.Response{}, metainforequester.ErrSelfPeer
+}
+
+func TestOurOwnAddressIsDialedOnce(t *testing.T) {
+	t.Parallel()
+
+	ours := netip.MustParseAddrPort("192.0.2.1:3334")
+	other := netip.MustParseAddrPort("192.0.2.2:6881")
+	dials := 0
+
+	c := newTestCrawler(map[netip.AddrPort]bool{ours: true}, nil)
+	c.metainfoRequester = selfRequester{dials: &dials}
+
+	if _, err := c.doRequestMetaInfo(context.Background(), sourceSample, protocol.ID{1}, []netip.AddrPort{ours}); err == nil {
+		t.Fatal("want an error from a swarm that is only us")
+	}
+
+	if dials != 1 || c.selfPeers.without([]netip.AddrPort{ours})[0] != ours {
+		t.Fatal("a crawler without the set must work as before")
+	}
+
+	c.selfPeers = &selfPeers{}
+
+	for range 3 {
+		_, _ = c.doRequestMetaInfo(context.Background(), sourceSample, protocol.ID{1}, []netip.AddrPort{ours})
+	}
+
+	if dials != 2 || hashCount(t, c, sourceSample, "self_peer") != 2 {
+		t.Fatalf("want our own address dialed once more and then left alone, got %d dials", dials)
+	}
+
+	if kept := c.selfPeers.without([]netip.AddrPort{ours, other}); len(kept) != 1 || kept[0] != other {
+		t.Fatalf("want only the other peer kept, got %v", kept)
+	}
+
+	if classifyDialError(metainforequester.ErrSelfPeer) != "self" {
+		t.Fatal("dial result of our own address")
+	}
+}
+
 func TestCreateTorrentModelRefusesEmptyMetaInfo(t *testing.T) {
 	t.Parallel()
 

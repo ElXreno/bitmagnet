@@ -174,6 +174,10 @@ func (in *Incoming) Fetch() (Response, error) {
 		return Response{}, fmt.Errorf("%w: %w", ErrIncomingHandshake, err)
 	}
 
+	if hsInfo.PeerID == in.receiver.clientID {
+		return Response{}, ErrSelfPeer
+	}
+
 	peerClient := clientid.Peer([20]byte(hsInfo.PeerID))
 	peerVersion := ""
 	outcome := func(stage string) {

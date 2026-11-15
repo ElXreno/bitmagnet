@@ -231,6 +231,7 @@ func New(params Params) Result {
 						},
 						pingCache: newPingCache(
 							time.Duration(envInt("BITMAGNET_PING_CACHE_SECONDS", 300)) * time.Second),
+						selfPeers: &selfPeers{},
 						deadPeers: &ignoreFilter{
 							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
 						},

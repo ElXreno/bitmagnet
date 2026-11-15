@@ -716,6 +716,11 @@ func TestInboundRefusesWhatItCannotUse(t *testing.T) {
 			stageInboundHandshake, "no_extension_protocol",
 		},
 		{
+			"our own peer id",
+			peertest.Peer{InfoHash: hash, ID: [20]byte(i.inbound.receiver.PeerID()), Silent: true},
+			"self_conn", "self",
+		},
+		{
 			"closed network",
 			peertest.Peer{InfoHash: hash, ID: [20]byte([]byte("-XT1000-04d9f58343e2")), Silent: true},
 			stageInboundClosedNetwork, "closed_network_peer",

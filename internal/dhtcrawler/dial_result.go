@@ -21,6 +21,10 @@ func classifyDialError(err error) string {
 		return "limited"
 	}
 
+	if errors.Is(err, metainforequester.ErrSelfPeer) {
+		return "self"
+	}
+
 	if errors.Is(err, metainforequester.ErrClosedNetworkPeer) {
 		return "closed_network_peer"
 	}

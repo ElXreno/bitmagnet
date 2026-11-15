@@ -365,6 +365,42 @@ func TestReceiveLeavesClosedNetworkPeers(t *testing.T) {
 	}
 }
 
+func TestOurOwnPeerIDIsRecognised(t *testing.T) {
+	t.Parallel()
+
+	_, hash := testMetadata(t, "self")
+	receiver := NewReceiver(protocol.RandomPeerID(), 5*time.Second)
+	started := time.Now()
+
+	got := receiveWith(t, receiver, peertest.Peer{InfoHash: hash, ID: [20]byte(receiver.PeerID()), Silent: true}, nil)
+	if !errors.Is(got.err, ErrSelfPeer) || time.Since(started) > 2*time.Second {
+		t.Fatalf("incoming connection with our own peer id: want ErrSelfPeer at once, got %v", got.err)
+	}
+
+	listener := listenLoopback(t)
+
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+
+		defer conn.Close()
+
+		handshake := make([]byte, 68)
+		if _, err = io.ReadFull(conn, handshake); err == nil {
+			_, _ = conn.Write(handshake)
+		}
+	}()
+
+	outgoing := requester{clientID: protocol.RandomPeerID(), timeout: 5 * time.Second, dialer: &net.Dialer{}}
+
+	_, err := outgoing.Request(context.Background(), hash, listener.Addr().(*net.TCPAddr).AddrPort())
+	if !errors.Is(err, ErrSelfPeer) {
+		t.Fatalf("outgoing handshake answered with our own peer id: want ErrSelfPeer, got %v", err)
+	}
+}
+
 func TestReceiveBudget(t *testing.T) {
 	t.Parallel()
 

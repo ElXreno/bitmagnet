@@ -410,6 +410,10 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 	_ = conn.Close()
 
 	switch {
+	case errors.Is(err, metainforequester.ErrSelfPeer):
+		c.countHash(sourceInboundPeer, "self_conn", 1)
+
+		return classifyDialError(err)
 	case errors.Is(err, metainforequester.ErrClosedNetworkPeer):
 		c.countHash(sourceInboundPeer, stageInboundClosedNetwork, 1)
 

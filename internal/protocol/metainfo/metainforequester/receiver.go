@@ -35,8 +35,10 @@ const (
 	incomingMaxExtended = metadataPieceSize + 1024
 	incomingMaxMessage  = 1 << 20
 	incomingMaxDepth    = 32
-	incomingBudget      = 256 << 20
-	incomingParses      = 2
+	// a peer that connects and says nothing must not hold a slot for the whole fetch timeout
+	incomingHandshakeTimeout = 3 * time.Second
+	incomingBudget           = 256 << 20
+	incomingParses           = 2
 )
 
 type Receiver struct {
@@ -78,6 +80,7 @@ type Incoming struct {
 	InfoHash  protocol.ID
 	Encrypted bool
 	receiver  Receiver
+	conn      net.Conn
 	rw        io.ReadWriter
 	addr      netip.AddrPort
 	bits      PeerExtensionBits
@@ -89,7 +92,7 @@ type readWriter struct {
 }
 
 func (r Receiver) Accept(conn net.Conn, lookup MSELookup) (*Incoming, error) {
-	if err := conn.SetDeadline(time.Now().Add(r.timeout)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(min(r.timeout, incomingHandshakeTimeout))); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrIncomingHandshake, err)
 	}
 
@@ -101,7 +104,7 @@ func (r Receiver) Accept(conn net.Conn, lookup MSELookup) (*Incoming, error) {
 		return nil, fmt.Errorf("%w: %w", ErrIncomingHandshake, err)
 	}
 
-	in := &Incoming{receiver: r, rw: conn}
+	in := &Incoming{receiver: r, conn: conn, rw: conn}
 	rest := head[protocolLen:]
 
 	var encryptedFor *protocol.ID
@@ -147,6 +150,10 @@ func (r Receiver) Accept(conn net.Conn, lookup MSELookup) (*Incoming, error) {
 }
 
 func (in *Incoming) Fetch() (Response, error) {
+	if err := in.conn.SetDeadline(time.Now().Add(in.receiver.timeout)); err != nil {
+		return Response{}, fmt.Errorf("%w: %w", ErrIncomingHandshake, err)
+	}
+
 	if !in.bits.GetBit(ExtensionBitLtep) {
 		return Response{}, fmt.Errorf("%w: peer does not support the extension protocol", ErrIncomingHandshake)
 	}

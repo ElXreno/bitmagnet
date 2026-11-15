@@ -78,7 +78,7 @@ func inboundConfigFromEnv() (inboundConfig, bool) {
 	return inboundConfig{
 		maxHashes: envInt("BITMAGNET_INBOUND_MAX_HASHES", 2*announcesPerSecond*holdSeconds),
 		hold:      time.Duration(holdSeconds) * time.Second,
-		maxConns:  envInt("BITMAGNET_INBOUND_MAX_CONNS", 500),
+		maxConns:  envInt("BITMAGNET_INBOUND_MAX_CONNS", 3000),
 		maxPerIP:  envInt("BITMAGNET_INBOUND_MAX_CONNS_PER_IP", 8),
 		lateMax:   envInt("BITMAGNET_INBOUND_LATE_HASHES", 50_000),
 		lateTTL:   time.Duration(envInt("BITMAGNET_INBOUND_LATE_SECONDS", 900)) * time.Second,

@@ -55,6 +55,7 @@ type Result struct {
 	ProbeTotal     prometheus.Collector `group:"prometheus_collectors"`
 	SwarmTotal     prometheus.Collector `group:"prometheus_collectors"`
 	PeerDialTotal  prometheus.Collector `group:"prometheus_collectors"`
+	ClosedClients  prometheus.Collector `group:"prometheus_collectors"`
 	LookupQueries  prometheus.Collector `group:"prometheus_collectors"`
 	ClassTotal     prometheus.Collector `group:"prometheus_collectors"`
 	TrackerPackets prometheus.Collector `group:"prometheus_collectors"`
@@ -111,6 +112,12 @@ func New(params Params) Result {
 		Name:      "swarm_total",
 		Help:      "Info hashes that reached the meta info stage, by the DHT versions of their peers and the outcome.",
 	}, []string{"class", "outcome"})
+	closedClientSwarms := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "bitmagnet",
+		Subsystem: "dht_crawler",
+		Name:      "closed_client_swarms",
+		Help:      "Swarms seen of each peer client found to be a closed network: none of them gave meta info.",
+	}, []string{"client"})
 	peerDialTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "bitmagnet",
 		Subsystem: "dht_crawler",
@@ -152,6 +159,32 @@ func New(params Params) Result {
 						time.Duration(envInt("BITMAGNET_CLOSED_SWARM_TTL_HOURS", 72))*time.Hour, 6*time.Hour, 6_000_000)
 					if err != nil {
 						return err
+					}
+
+					var closedClients *clientLearner
+
+					if os.Getenv("BITMAGNET_CLOSED_LEARN") != "off" {
+						closedClients = newClientLearner(
+							clientLearnerFile, envInt("BITMAGNET_CLOSED_LEARN_MIN_SWARMS", 1000), 0.002)
+
+						for client, stat := range closedClients.closed() {
+							closedClientSwarms.WithLabelValues(client).Set(float64(stat.Swarms))
+						}
+
+						logger := params.Logger.Named("dht_crawler")
+						closedClients.onChange = func(client string, stat clientStat) {
+							if !stat.Closed {
+								closedClientSwarms.DeleteLabelValues(client)
+								logger.Infow("peer client is no longer treated as a closed network",
+									"client", client, "swarms", stat.Swarms, "fetched", stat.Fetched)
+
+								return
+							}
+
+							closedClientSwarms.WithLabelValues(client).Set(float64(stat.Swarms))
+							logger.Infow("peer client found to be a closed network",
+								"client", client, "swarms", stat.Swarms, "fetched", stat.Fetched)
+						}
 					}
 
 					aliases, err := newFailedHashes("alias_hashes", 30*24*time.Hour, 24*time.Hour, 1_000_000)
@@ -225,6 +258,7 @@ func New(params Params) Result {
 						failed:        failed,
 						failedSeeded:  failedSeeded,
 						closedSwarms:  closedSwarms,
+						closedClients: closedClients,
 						aliases:       aliases,
 						fetched: &ignoreFilter{
 							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
@@ -300,6 +334,10 @@ func New(params Params) Result {
 						return err
 					}
 
+					if err := c.closedClients.save(); err != nil {
+						return err
+					}
+
 					if err := c.aliases.save(); err != nil {
 						return err
 					}
@@ -315,6 +353,7 @@ func New(params Params) Result {
 		ProbeTotal:       probeTotal,
 		SwarmTotal:       swarmTotal,
 		PeerDialTotal:    peerDialTotal,
+		ClosedClients:    closedClientSwarms,
 		LookupQueries:    lookupQueries,
 		ClassTotal:       classTotal,
 		TrackerPackets:   trackerMetrics.packets,

@@ -35,6 +35,20 @@ type requester struct {
 	utp      *utp.Socket
 }
 
+// PeerError is a fetch that failed after the peer said who it is.
+type PeerError struct {
+	PeerID protocol.ID
+	Err    error
+}
+
+func (e *PeerError) Error() string {
+	return e.Err.Error()
+}
+
+func (e *PeerError) Unwrap() error {
+	return e.Err
+}
+
 // ErrClosedNetworkPeer marks a failed fetch from a peer of a network that does not serve meta info.
 var ErrClosedNetworkPeer = errors.New("peer of a closed network")
 
@@ -201,6 +215,8 @@ func (r requester) request(
 	}
 	failed := func(stage string, err error) (Response, error) {
 		outcome(stage)
+
+		err = &PeerError{PeerID: hsInfo.PeerID, Err: err}
 
 		if clientid.ClosedNetwork(peerClient) {
 			err = errors.Join(ErrClosedNetworkPeer, err)

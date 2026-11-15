@@ -53,6 +53,7 @@ type crawler struct {
 	failed                       *failedHashes
 	failedSeeded                 *failedHashes
 	closedSwarms                 *failedHashes
+	closedClients                *clientLearner
 	aliases                      *failedHashes
 	inbound                      *inboundPeers
 	infoHashTriage               concurrency.BatchingChannel[nodeHasPeersForHash]
@@ -242,6 +243,10 @@ func (c *crawler) saveFailedHashes(ctx context.Context) {
 				if err := memory.save(); err != nil {
 					c.logger.Errorf("failed to save the failed info hash memory: %s", err.Error())
 				}
+			}
+
+			if err := c.closedClients.save(); err != nil {
+				c.logger.Errorf("failed to save the closed client verdicts: %s", err.Error())
 			}
 		}
 	}

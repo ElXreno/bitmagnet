@@ -66,6 +66,28 @@ func Peer(id [20]byte) string {
 	return Other
 }
 
+// PeerKey is the part of a peer id that a client shares with every other copy of itself.
+func PeerKey(id [20]byte) string {
+	printable := func(b []byte) bool {
+		for _, c := range b {
+			if c < 0x21 || c > 0x7e {
+				return false
+			}
+		}
+
+		return true
+	}
+
+	switch {
+	case id[0] == '-' && id[7] == '-' && printable(id[1:7]):
+		return string(id[:8])
+	case printable(id[:4]):
+		return string(id[:4])
+	default:
+		return "binary"
+	}
+}
+
 // Node names the DHT implementation announced in the "v" field of a KRPC message.
 func Node(v string) string {
 	if len(v) < 2 {

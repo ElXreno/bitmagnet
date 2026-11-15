@@ -50,6 +50,23 @@ func TestClosedNetwork(t *testing.T) {
 	}
 }
 
+func TestPeerKey(t *testing.T) {
+	t.Parallel()
+
+	for peerID, want := range map[string]string{
+		"-XT1000-04d9f58343e2":             "-XT1000-",
+		"-qB5300-abcdefghijkl":             "-qB5300-",
+		"TIX0325-abcdefghijkl":             "TIX0",
+		"M7-10-5--abcdefghijk":             "M7-1",
+		"\x01\x02\x03\x04abcdefghijklmnop": "binary",
+		"-X\x00T100-abcdefghijkl":          "binary",
+	} {
+		if got := PeerKey(id(peerID)); got != want {
+			t.Errorf("%q: want %q, got %q", peerID, want, got)
+		}
+	}
+}
+
 func TestNode(t *testing.T) {
 	t.Parallel()
 

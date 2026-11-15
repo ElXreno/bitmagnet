@@ -280,6 +280,7 @@ func (c *crawler) doRequestMetaInfo(
 	var errs []error
 
 	closedPeers := 0
+	clients := make(map[string]struct{})
 
 	for {
 		for inflight < metaInfoParallelDials && next < len(candidates) {
@@ -340,7 +341,19 @@ func (c *crawler) doRequestMetaInfo(
 				c.countHash(source, "self_peer", 1)
 			}
 
-			if errors.Is(r.err, metainforequester.ErrClosedNetworkPeer) {
+			learnedClosed := false
+
+			var peerErr *metainforequester.PeerError
+			if errors.As(r.err, &peerErr) {
+				key := clientid.PeerKey([20]byte(peerErr.PeerID))
+				clients[key] = struct{}{}
+
+				if learnedClosed = c.closedClients.isClosed(key); learnedClosed {
+					c.countHash(source, "closed_client_learned", 1)
+				}
+			}
+
+			if errors.Is(r.err, metainforequester.ErrClosedNetworkPeer) || learnedClosed {
 				closedPeers++
 
 				if closedSwarmPolicy && next < len(candidates) {
@@ -364,8 +377,13 @@ func (c *crawler) doRequestMetaInfo(
 			c.countHash(source, stageMetaInfoOK+"6", 1)
 		}
 
+		clients[clientid.PeerKey([20]byte(r.res.PeerID))] = struct{}{}
+		c.closedClients.observe(clients, true)
+
 		return r.res, nil
 	}
+
+	c.closedClients.observe(clients, false)
 
 	if len(errs) == 0 {
 		countSwarm("no_candidates")

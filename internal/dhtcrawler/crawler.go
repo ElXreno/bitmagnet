@@ -68,6 +68,7 @@ type crawler struct {
 	// that checks if a hash has already been indexed.
 	ignoreHashes    *ignoreFilter
 	ignoreNodes     *ignoreFilter
+	sampledNodes    *ignoreFilter
 	blockingManager blocking.Manager
 	// soughtNodeID is a random node ID used as the target for find_node and sample_infohashes requests.
 	// It is rotated every 10 seconds.

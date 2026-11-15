@@ -213,6 +213,9 @@ func New(params Params) Result {
 						ignoreHashes: &ignoreFilter{
 							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
 						},
+						sampledNodes: &ignoreFilter{
+							bloom: boom.NewStableBloomFilter(20_000_000, 2, 0.001),
+						},
 						ignoreNodes: &ignoreFilter{
 							bloom: boom.NewStableBloomFilter(200_000*uint(scalingFactor), 2, 0.001),
 						},

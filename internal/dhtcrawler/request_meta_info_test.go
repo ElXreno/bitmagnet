@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	mi "github.com/anacrolix/torrent/metainfo"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
@@ -138,5 +139,28 @@ func TestPingCacheServesRepeatedAddresses(t *testing.T) {
 
 	if _, cached := off.get(addr); cached {
 		t.Fatal("a disabled cache must stay empty")
+	}
+}
+
+func TestCreateTorrentModelKeepsOneFilePerPath(t *testing.T) {
+	t.Parallel()
+
+	info := metainfo.Info{
+		Name:        "x",
+		PieceLength: 16384,
+		Files: []mi.FileInfo{
+			{Path: []string{"a"}, Length: 1},
+			{Path: []string{"a"}, Length: 2},
+			{Path: []string{"b"}, Length: 3},
+		},
+	}
+
+	torrent, err := createTorrentModel(protocol.ID{1}, info, false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(torrent.Files) != 2 || torrent.Files[0].Index != 0 || torrent.Files[0].Size != 1 || torrent.Files[1].Index != 2 {
+		t.Fatalf("want the first file of each path with its original index, got %+v", torrent.Files)
 	}
 }

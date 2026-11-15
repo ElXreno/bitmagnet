@@ -180,16 +180,25 @@ func createTorrentModel(
 
 	files := make([]model.TorrentFile, 0, min(int(saveFilesThreshold), len(info.Files)))
 
+	seenPaths := make(map[string]struct{}, min(int(saveFilesThreshold), len(info.Files)))
+
 	for i, file := range info.Files {
 		if i >= int(saveFilesThreshold) {
 			filesStatus = model.FilesStatusOverThreshold
 			break
 		}
 
+		path := file.DisplayPath(&info)
+		if _, seen := seenPaths[path]; seen {
+			continue
+		}
+
+		seenPaths[path] = struct{}{}
+
 		files = append(files, model.TorrentFile{
 			InfoHash: hash,
 			Index:    uint(i),
-			Path:     file.DisplayPath(&info),
+			Path:     path,
 			Size:     uint(file.Length),
 		})
 	}

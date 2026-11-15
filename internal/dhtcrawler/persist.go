@@ -67,6 +67,8 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 				if t, err := createTorrentModel(
 					i.infoHash, i.metaInfo, c.savePieces, c.saveFilesThreshold); err != nil {
 					c.logger.Errorf("error creating torrent model: %s", err.Error())
+					c.countHash(i.source, "persist_refused", 1)
+					delete(hashMap, i.infoHash)
 				} else {
 					for _, f := range t.Files {
 						fc := f

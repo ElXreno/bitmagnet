@@ -162,7 +162,12 @@ func (c *crawler) doRequestMetaInfo(
 			inflight++
 
 			go func() {
-				res, err := c.metainfoRequester.Request(dialCtx, hash, cand.addr)
+				requestCtx := dialCtx
+				if cand.ping == "ok" {
+					requestCtx = metainforequester.WithUTPFallback(dialCtx)
+				}
+
+				res, err := c.metainfoRequester.Request(requestCtx, hash, cand.addr)
 				outcome := dialOutcome(err)
 
 				if outcome == "timeout" || outcome == "refused" || outcome == "unreachable" {
@@ -187,7 +192,10 @@ func (c *crawler) doRequestMetaInfo(
 		inflight--
 
 		result := classifyDialError(r.err)
-		if r.err == nil && r.res.Encrypted {
+		switch {
+		case r.err == nil && r.res.Transport == "utp":
+			result = "ok_utp"
+		case r.err == nil && r.res.Encrypted:
 			result = "ok_mse"
 		}
 
@@ -228,7 +236,7 @@ func peerKey(p netip.AddrPort) protocol.ID {
 
 func dialOutcome(err error) string {
 	switch result := classifyDialError(err); result {
-	case "dial_timeout":
+	case "dial_timeout", "utp_dial_failed":
 		return "timeout"
 	case "dial_refused":
 		return "refused"

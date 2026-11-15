@@ -37,6 +37,10 @@ func classifyDialError(err error) string {
 
 	msg := err.Error()
 
+	if strings.HasPrefix(msg, "utp dial: ") {
+		return "utp_dial_failed"
+	}
+
 	if strings.HasPrefix(msg, "mse retry: ") {
 		inner := errors.Unwrap(err)
 		if strings.HasPrefix(inner.Error(), "mse handshake: ") {

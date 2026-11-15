@@ -11,6 +11,7 @@ require (
 	github.com/anacrolix/dht/v2 v2.22.0
 	github.com/anacrolix/missinggo/v2 v2.8.0
 	github.com/anacrolix/torrent v1.58.0
+	github.com/anacrolix/utp v0.2.0
 	github.com/bits-and-blooms/bloom/v3 v3.7.0
 	github.com/facette/natsort v0.0.0-20181210072756-2cd4dd1e2dcb
 	github.com/frankban/quicktest v1.14.6

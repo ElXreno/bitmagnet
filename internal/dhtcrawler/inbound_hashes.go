@@ -22,7 +22,7 @@ func (c *crawler) runInboundHashes(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				return
-			case c.infoHashTriage.In() <- nodeHasPeersForHash{
+			case c.inboundTriage.In() <- nodeHasPeersForHash{
 				infoHash: h.InfoHash,
 				node:     h.Node,
 				source:   h.Query,

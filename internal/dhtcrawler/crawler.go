@@ -34,6 +34,7 @@ type crawler struct {
 	discoveredNodes              concurrency.BatchingChannel[ktable.Node]
 	inboundHashes                <-chan responder.InboundHash
 	inboundSeen                  *ignoreFilter
+	inboundTriage                concurrency.BatchingChannel[nodeHasPeersForHash]
 	hashesTotal                  *prometheus.CounterVec
 	dialsTotal                   *prometheus.CounterVec
 	nodesForPing                 concurrency.BufferedConcurrentChannel[ktable.Node]
@@ -75,7 +76,8 @@ func (c *crawler) start() {
 	go c.getNodesForFindNode(ctx)
 	go c.runSampleInfoHashes(ctx)
 	go c.getNodesForSampleInfoHashes(ctx)
-	go c.runInfoHashTriage(ctx)
+	go c.runInfoHashTriage(ctx, "triage", c.infoHashTriage)
+	go c.runInfoHashTriage(ctx, "triage_inbound", c.inboundTriage)
 	go c.runInboundHashes(ctx)
 	go c.runGetPeers(ctx)
 	go c.runRequestMetaInfo(ctx)

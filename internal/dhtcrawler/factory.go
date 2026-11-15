@@ -102,6 +102,8 @@ func New(params Params) Result {
 						oldPeerThreshold:             time.Minute * 15,
 						discoveredNodes:              params.DiscoveredNodes,
 						inboundHashes:                params.InboundHashes,
+						inboundTriage: concurrency.NewBatchingChannel[nodeHasPeersForHash](
+							10*scalingFactor, 1000, 2*time.Second),
 						inboundSeen: &ignoreFilter{
 							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
 						},

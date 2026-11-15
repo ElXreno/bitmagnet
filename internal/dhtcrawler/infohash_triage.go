@@ -5,6 +5,7 @@ import (
 	"database/sql/driver"
 	"time"
 
+	"github.com/bitmagnet-io/bitmagnet/internal/concurrency"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 )
@@ -19,12 +20,20 @@ import (
 //  3. The hash is in the database, but the seeders/leechers are not known or are outdated,
 //     so it is forwarded to the scrape channel.
 //  4. The hash is in the database and the seeders/leechers are known and up to date, so it is discarded.
-func (c *crawler) runInfoHashTriage(ctx context.Context) {
+func (c *crawler) runInfoHashTriage(
+	ctx context.Context,
+	name string,
+	in concurrency.BatchingChannel[nodeHasPeersForHash],
+) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case reqs := <-c.infoHashTriage.Out():
+		case reqs := <-in.Out():
+			started := time.Now()
+
+			c.countHash(name, "batches", 1)
+			c.countHash(name, "batch_hashes", len(reqs))
 			allHashes := make([]protocol.ID, 0, len(reqs))
 
 			reqMap := make(map[protocol.ID]nodeHasPeersForHash, len(reqs))
@@ -38,6 +47,7 @@ func (c *crawler) runInfoHashTriage(ctx context.Context) {
 			}
 
 			filteredHashes, filterErr := c.blockingManager.Filter(ctx, allHashes)
+			c.countHash(name, "filter_ms", int(time.Since(started).Milliseconds()))
 			if filterErr != nil {
 				c.logger.Errorf("failed to filter infohashes: %s", filterErr.Error())
 				break
@@ -81,6 +91,9 @@ func (c *crawler) runInfoHashTriage(ctx context.Context) {
 				break
 			}
 
+			c.countHash(name, "db_ms", int(time.Since(started).Milliseconds()))
+
+			sendStarted := time.Now()
 			foundTorrents := make(map[protocol.ID]triageResult)
 			for _, t := range result {
 				foundTorrents[t.InfoHash] = *t
@@ -114,6 +127,8 @@ func (c *crawler) runInfoHashTriage(ctx context.Context) {
 					c.countHash(r.source, stageKnown, 1)
 				}
 			}
+
+			c.countHash(name, "send_ms", int(time.Since(sendStarted).Milliseconds()))
 		}
 	}
 }

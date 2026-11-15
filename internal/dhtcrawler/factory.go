@@ -27,6 +27,7 @@ type Params struct {
 	fx.In
 	Config            Config
 	KTable            ktable.Table
+	KTable6           ktable.Table `name:"dht_ktable_ipv6"`
 	Client            lazy.Lazy[client.Client]
 	MetainfoRequester metainforequester.Requester
 	BanningChecker    banning.Checker `name:"metainfo_banning_checker"`
@@ -141,8 +142,15 @@ func New(params Params) Result {
 						trackers6 = nil
 					}
 
+					var v6 *nodeFamily
+					if cl.IPv6() {
+						v6 = newNodeFamily("6", params.KTable6, scalingFactor)
+						v6.discovered = make(chan ktable.Node, 100*scalingFactor)
+					}
+
 					c = crawler{
-						kTable:                       params.KTable,
+						v4:                           newNodeFamily("", params.KTable, scalingFactor),
+						v6:                           v6,
 						client:                       cl,
 						metainfoRequester:            params.MetainfoRequester,
 						banningChecker:               params.BanningChecker,
@@ -168,20 +176,11 @@ func New(params Params) Result {
 						fetched: &ignoreFilter{
 							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
 						},
-						nodePool: newNodePool(),
 						pingCache: newPingCache(
 							time.Duration(envInt("BITMAGNET_PING_CACHE_SECONDS", 300)) * time.Second),
 						deadPeers: &ignoreFilter{
 							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
 						},
-						nodesForPing: concurrency.NewBufferedConcurrentChannel[ktable.Node](
-							scalingFactor, scalingFactor),
-						nodesForFindNode: concurrency.NewBufferedConcurrentChannel[ktable.Node](
-							10*scalingFactor, 10*scalingFactor),
-						nodesForSampleInfoHashes: concurrency.NewBufferedConcurrentChannel[ktable.Node](
-							40*scalingFactor,
-							40*scalingFactor,
-						),
 						infoHashTriage: concurrency.NewBatchingChannel[nodeHasPeersForHash](
 							10*scalingFactor, 1000, 20*time.Second),
 						getPeers: concurrency.NewBufferedConcurrentChannel[nodeHasPeersForHash](
@@ -212,9 +211,6 @@ func New(params Params) Result {
 						dao:                query,
 						ignoreHashes: &ignoreFilter{
 							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
-						},
-						ignoreNodes: &ignoreFilter{
-							bloom: boom.NewStableBloomFilter(200_000*uint(scalingFactor), 2, 0.001),
 						},
 						blockingManager: blockingManager,
 						soughtNodeID:    &concurrency.AtomicValue[protocol.ID]{},

@@ -53,19 +53,50 @@ func (c *crawler) runDiscoveredNodes(ctx context.Context) {
 			// sent to any one of the pipeline channels.
 			for _, addr := range addrs {
 				p := m[addr.String()]
+				f := c.family(addr)
 
-				if c.ignoreNodes.test(p.ID()) {
+				if f.discovered != nil {
+					select {
+					case f.discovered <- p:
+					default:
+					}
+
 					continue
 				}
 
-				select {
-				case <-ctx.Done():
+				if !f.dispatchDiscoveredNode(ctx, p) {
 					return
-				case c.nodesForFindNode.In() <- p:
-				case c.nodesForSampleInfoHashes.In() <- p:
-					c.ignoreNodes.add(p.ID())
-				case c.nodesForPing.In() <- p:
 				}
+			}
+		}
+	}
+}
+
+func (f *nodeFamily) dispatchDiscoveredNode(ctx context.Context, p ktable.Node) bool {
+	if f.ignoreNodes.test(p.ID()) {
+		return true
+	}
+
+	select {
+	case <-ctx.Done():
+		return false
+	case f.nodesForFindNode.In() <- p:
+	case f.nodesForSampleInfoHashes.In() <- p:
+		f.ignoreNodes.add(p.ID())
+	case f.nodesForPing.In() <- p:
+	}
+
+	return true
+}
+
+func (c *crawler) runDiscoveredNodes6(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case p := <-c.v6.discovered:
+			if !c.v6.dispatchDiscoveredNode(ctx, p) {
+				return
 			}
 		}
 	}

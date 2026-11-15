@@ -104,14 +104,14 @@ func (p *nodePool) closest(target protocol.ID, n int) []client.NodeInfo {
 	return sorted[from:to]
 }
 
-func (c *crawler) runNodePool(ctx context.Context) {
+func (c *crawler) runNodePool(ctx context.Context, f *nodeFamily) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(nodePoolRebuildInterval):
-			c.nodePool.rebuild()
-			c.stageGauge.With(prometheusLabels("node_pool", "queued")).Set(float64(c.nodePool.size()))
+			f.nodePool.rebuild()
+			c.stageGauge.With(prometheusLabels("node_pool"+f.suffix, "queued")).Set(float64(f.nodePool.size()))
 		}
 	}
 }

@@ -101,7 +101,7 @@ const (
 	stageLookupFound   = "lookup_found"
 	stageLookupEmpty   = "lookup_empty"
 	stageLookupQueries = "lookup_queries"
-	stageLookupRounds  = "lookup_rounds"
+	stageScrapeDropped = "scrape_dropped"
 	sourceSample       = "sample_infohashes"
 	stageDiscovered    = "discovered"
 	stageNeedsMetaInfo = "needs_metainfo"

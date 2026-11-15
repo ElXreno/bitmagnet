@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"net/netip"
-	"sync"
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
@@ -12,12 +11,12 @@ import (
 )
 
 const (
-	lookupAlpha        = 4
-	lookupMaxRounds    = 6
+	lookupAlpha        = 6
+	lookupDeadline     = 10 * time.Second
 	lookupMaxQueries   = 24
 	lookupEnoughPeers  = 8
 	lookupMaxPeers     = 16
-	lookupQueryTimeout = time.Second
+	lookupQueryTimeout = 2 * time.Second
 )
 
 type lookupNode struct {
@@ -61,12 +60,22 @@ func (c *crawler) lookupPeers(
 
 	peers := make(map[netip.AddrPort]struct{})
 	queries := 0
-	rounds := 0
+	inflight := 0
+	afterFirstPeers := 0
+	stop := false
 
-	for rounds < lookupMaxRounds && queries < lookupMaxQueries && ctx.Err() == nil {
-		next := make([]*lookupNode, 0, lookupAlpha)
+	type lookupResult struct {
+		res client.GetPeersResult
+		ok  bool
+	}
 
-		for len(next) < lookupAlpha {
+	results := make(chan lookupResult, lookupMaxQueries)
+
+	lookupCtx, cancel := context.WithTimeout(ctx, lookupDeadline)
+	defer cancel()
+
+	for {
+		for !stop && inflight < lookupAlpha && queries < lookupMaxQueries {
 			var best *lookupNode
 
 			for _, n := range candidates {
@@ -80,61 +89,47 @@ func (c *crawler) lookupPeers(
 			}
 
 			best.queried = true
-			next = append(next, best)
+			inflight++
+			queries++
+
+			go func(addr netip.AddrPort) {
+				queryCtx, queryCancel := context.WithTimeout(lookupCtx, lookupQueryTimeout)
+				defer queryCancel()
+
+				res, err := c.client.GetPeers(queryCtx, addr, hash)
+				results <- lookupResult{res: res, ok: err == nil}
+			}(best.addr)
 		}
 
-		if len(next) == 0 {
+		if inflight == 0 {
 			break
 		}
 
-		results := make([]client.GetPeersResult, len(next))
-		oks := make([]bool, len(next))
+		r := <-results
+		inflight--
 
-		var wg sync.WaitGroup
-
-		for i, n := range next {
-			wg.Add(1)
-
-			go func() {
-				defer wg.Done()
-
-				queryCtx, cancel := context.WithTimeout(ctx, lookupQueryTimeout)
-				defer cancel()
-
-				res, err := c.client.GetPeers(queryCtx, n.addr, hash)
-				results[i], oks[i] = res, err == nil
-			}()
+		if len(peers) > 0 {
+			afterFirstPeers++
 		}
 
-		wg.Wait()
-
-		rounds++
-		queries += len(next)
-		hadPeers := len(peers) > 0
-
-		for i, res := range results {
-			if !oks[i] {
-				continue
-			}
-
-			for _, v := range res.Values {
+		if r.ok {
+			for _, v := range r.res.Values {
 				if len(peers) < lookupMaxPeers {
 					peers[v] = struct{}{}
 				}
 			}
 
-			for _, n := range res.Nodes {
+			for _, n := range r.res.Nodes {
 				add(n.ID, n.Addr)
 			}
 		}
 
-		if len(peers) >= lookupEnoughPeers || hadPeers {
-			break
+		if len(peers) >= lookupEnoughPeers || afterFirstPeers >= lookupAlpha || lookupCtx.Err() != nil {
+			stop = true
 		}
 	}
 
 	c.countHash(source, stageLookupQueries, queries)
-	c.countHash(source, stageLookupRounds, rounds)
 
 	result := make([]netip.AddrPort, 0, len(peers))
 	for p := range peers {

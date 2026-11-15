@@ -130,6 +130,10 @@ func (c *crawler) runInfoHashTriage(
 						c.countHash(name, "send_scrape_us", int(time.Since(sendOne).Microseconds()))
 
 						continue
+					default:
+						c.countHash(r.source, stageScrapeDropped, 1)
+
+						continue
 					}
 				} else {
 					c.countHash(r.source, stageKnown, 1)

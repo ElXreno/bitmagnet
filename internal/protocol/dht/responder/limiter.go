@@ -49,6 +49,12 @@ func NewLimiter(
 }
 
 func (l *limiter) Allow(addr netip.Addr) bool {
+	if dht.IsIPv6(addr) {
+		if prefix, err := addr.Prefix(64); err == nil {
+			addr = prefix.Addr()
+		}
+	}
+
 	if !l.keyedLimiter.Allow(addr.String()) {
 		limiterRefusedTotal.With(prometheus.Labels{"scope": "ip"}).Inc()
 

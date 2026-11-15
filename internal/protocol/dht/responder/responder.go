@@ -18,6 +18,7 @@ type Responder interface {
 type responder struct {
 	nodeID                   protocol.ID
 	kTable                   ktable.Table
+	kTable6                  ktable.Table
 	tokenSecret              []byte
 	sampleInfoHashesInterval int64
 }
@@ -50,6 +51,12 @@ func (r responder) Respond(_ context.Context, msg dht.RecvMsg) (ret dht.Return, 
 	}
 
 	ret.ID = r.nodeID
+	fromIPv6 := r.kTable6 != nil && dht.IsIPv6(msg.From.Addr())
+	table := r.kTable
+
+	if fromIPv6 {
+		table = r.kTable6
+	}
 
 	switch msg.Msg.Q {
 	case dht.QPing:
@@ -59,15 +66,21 @@ func (r responder) Respond(_ context.Context, msg dht.RecvMsg) (ret dht.Return, 
 			return
 		}
 
-		closestNodes := r.kTable.GetClosestNodes(args.Target)
-		ret.Nodes = nodeInfosFromNodes(closestNodes...)
+		want4, want6 := r.wants(args, fromIPv6)
+		if want4 {
+			ret.Nodes = nodeInfosFromNodes(r.kTable.GetClosestNodes(args.Target)...)
+		}
+
+		if want6 {
+			ret.Nodes6 = nodeInfosFromNodes(r.kTable6.GetClosestNodes(args.Target)...)
+		}
 	case dht.QGetPeers:
 		if args.InfoHash == [20]byte{} {
 			err = ErrMissingArguments
 			return
 		}
 
-		result := r.kTable.GetHashOrClosestNodes(args.InfoHash)
+		result := table.GetHashOrClosestNodes(args.InfoHash)
 		if result.Found {
 			hashPeers := result.Hash.Peers()
 			values := make([]dht.NodeAddr, 0, len(hashPeers))
@@ -79,7 +92,25 @@ func (r responder) Respond(_ context.Context, msg dht.RecvMsg) (ret dht.Return, 
 			ret.Values = values
 		}
 
-		ret.Nodes = nodeInfosFromNodes(result.ClosestNodes...)
+		want4, want6 := r.wants(args, fromIPv6)
+		if want4 {
+			nodes := result.ClosestNodes
+			if fromIPv6 {
+				nodes = r.kTable.GetClosestNodes(args.InfoHash)
+			}
+
+			ret.Nodes = nodeInfosFromNodes(nodes...)
+		}
+
+		if want6 {
+			nodes := result.ClosestNodes
+			if !fromIPv6 {
+				nodes = r.kTable6.GetClosestNodes(args.InfoHash)
+			}
+
+			ret.Nodes6 = nodeInfosFromNodes(nodes...)
+		}
+
 		token := r.announceToken(args.InfoHash, args.ID, msg.From.Addr())
 		ret.Token = &token
 	case dht.QAnnouncePeer:
@@ -93,11 +124,11 @@ func (r responder) Respond(_ context.Context, msg dht.RecvMsg) (ret dht.Return, 
 			return
 		}
 
-		r.kTable.BatchCommand(ktable.PutHash{ID: args.InfoHash, Peers: []ktable.HashPeer{{
+		table.BatchCommand(ktable.PutHash{ID: args.InfoHash, Peers: []ktable.HashPeer{{
 			Addr: netip.AddrPortFrom(msg.From.Addr(), msg.AnnouncePort()),
 		}}})
 	case dht.QSampleInfohashes:
-		result := r.kTable.SampleHashesAndNodes()
+		result := table.SampleHashesAndNodes()
 		samples := make(dht.CompactInfohashes, 0, len(result.Hashes))
 
 		for _, h := range result.Hashes {
@@ -105,7 +136,13 @@ func (r responder) Respond(_ context.Context, msg dht.RecvMsg) (ret dht.Return, 
 		}
 
 		ret.Samples = &samples
-		ret.Nodes = nodeInfosFromNodes(result.Nodes...)
+
+		if fromIPv6 {
+			ret.Nodes6 = nodeInfosFromNodes(result.Nodes...)
+		} else {
+			ret.Nodes = nodeInfosFromNodes(result.Nodes...)
+		}
+
 		numInt64 := int64(result.TotalHashes)
 		ret.Num = &numInt64
 		ret.Interval = &r.sampleInfoHashesInterval
@@ -115,6 +152,28 @@ func (r responder) Respond(_ context.Context, msg dht.RecvMsg) (ret dht.Return, 
 	}
 
 	return
+}
+
+// BEP 32: the node lists named by want, without it the family the query arrived over.
+func (r responder) wants(args *dht.MsgArgs, fromIPv6 bool) (want4 bool, want6 bool) {
+	if r.kTable6 == nil {
+		return true, false
+	}
+
+	for _, w := range args.Want {
+		switch w {
+		case dht.WantNodes:
+			want4 = true
+		case dht.WantNodes6:
+			want6 = true
+		}
+	}
+
+	if !want4 && !want6 {
+		return !fromIPv6, fromIPv6
+	}
+
+	return want4, want6
 }
 
 // announceToken returns the token for an announce_peer request.

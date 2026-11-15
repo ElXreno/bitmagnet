@@ -5,6 +5,7 @@ import (
 
 	"github.com/bitmagnet-io/bitmagnet/internal/concurrency"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/fx"
@@ -16,6 +17,7 @@ import (
 type Params struct {
 	fx.In
 	KTable          ktable.Table
+	KTable6         ktable.Table                             `name:"dht_ktable_ipv6"`
 	DiscoveredNodes concurrency.BatchingChannel[ktable.Node] `name:"dht_discovered_nodes"`
 	InboundHashes   chan InboundHash                         `name:"dht_inbound_hashes"`
 	Logger          *zap.SugaredLogger
@@ -39,10 +41,16 @@ const (
 )
 
 func New(p Params) Result {
+	var kTable6 ktable.Table
+	if dht.IPv6Enabled() {
+		kTable6 = p.KTable6
+	}
+
 	collector := newPrometheusCollector(responderLimiter{
 		responder: responder{
 			nodeID:                   p.KTable.Origin(),
 			kTable:                   p.KTable,
+			kTable6:                  kTable6,
 			tokenSecret:              protocol.RandomNodeID().Bytes(),
 			sampleInfoHashesInterval: 10,
 		},

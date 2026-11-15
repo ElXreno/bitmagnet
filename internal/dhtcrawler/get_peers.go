@@ -16,73 +16,89 @@ var errNoPeers = errors.New("no peers found")
 
 func (c *crawler) runGetPeers(ctx context.Context) {
 	_ = c.getPeers.Run(ctx, func(req nodeHasPeersForHash) {
-		var peers []netip.AddrPort
-
-		if req.source == sourceSample {
-			pfh, nodes, pfhErr := c.requestPeersForHash(ctx, req)
-			if pfhErr == nil {
-				peers = pfh.peers
-
-				c.countHash(req.source, stagePeersFound, 1)
-				c.countHash(req.source, stagePeersSum, len(peers))
-			} else {
-				if errors.Is(pfhErr, errNoPeers) {
-					c.countHash(req.source, stageNoPeers, 1)
-				} else {
-					c.countHash(req.source, stageGetPeersError, 1)
-				}
-
-				req.source = sourceSampleLookup
-				peers = c.lookupPeers(ctx, req.source, req.infoHash, nodes)
-			}
-		} else {
-			found := c.lookupPeers(ctx, req.source, req.infoHash, nil)
-			if req.source == dht.QAnnouncePeer {
-				peers = append(append(peers, req.peers...), found...)
-			} else {
-				peers = append(append(peers, found...), req.peers...)
+		if req.source != sourceSample {
+			select {
+			case <-ctx.Done():
+			case c.lookups.In() <- lookupRequest{nodeHasPeersForHash: req}:
 			}
 
-			if len(found) == 0 {
-				c.countHash(req.source, stageLookupEmpty, 1)
-			} else {
-				c.countHash(req.source, stageLookupFound, 1)
-				c.countHash(req.source, stagePeersSum, len(found))
-			}
-		}
-
-		if req.source == sourceSampleLookup {
-			if len(peers) == 0 {
-				c.countHash(req.source, stageLookupEmpty, 1)
-
-				return
-			}
-
-			c.countHash(req.source, stageLookupFound, 1)
-			c.countHash(req.source, stagePeersSum, len(peers))
-		}
-
-		hashPeers := make([]ktable.HashPeer, 0, len(peers))
-		for _, p := range peers {
-			hashPeers = append(hashPeers, ktable.HashPeer{
-				Addr: p,
-			})
-		}
-
-		c.kTable.BatchCommand(
-			ktable.PutHash{ID: req.infoHash, Peers: hashPeers},
-		)
-
-		select {
-		case <-ctx.Done():
-			return
-		case c.requestMetaInfo.In() <- infoHashWithPeers{
-			nodeHasPeersForHash: req,
-			peers:               peers,
-		}:
 			return
 		}
+
+		pfh, nodes, pfhErr := c.requestPeersForHash(ctx, req)
+		if pfhErr != nil {
+			if errors.Is(pfhErr, errNoPeers) {
+				c.countHash(req.source, stageNoPeers, 1)
+			} else {
+				c.countHash(req.source, stageGetPeersError, 1)
+			}
+
+			req.source = sourceSampleLookup
+
+			select {
+			case c.lookups.In() <- lookupRequest{nodeHasPeersForHash: req, seeds: nodes}:
+			default:
+				c.countHash(req.source, stageLookupDropped, 1)
+			}
+
+			return
+		}
+
+		c.countHash(req.source, stagePeersFound, 1)
+		c.countHash(req.source, stagePeersSum, len(pfh.peers))
+		c.forwardPeers(ctx, req, pfh.peers)
 	})
+}
+
+type lookupRequest struct {
+	nodeHasPeersForHash
+	seeds []client.NodeInfo
+}
+
+func (c *crawler) runLookups(ctx context.Context) {
+	_ = c.lookups.Run(ctx, func(req lookupRequest) {
+		found := c.lookupPeers(ctx, req.source, req.infoHash, req.seeds)
+		if len(found) == 0 {
+			c.countHash(req.source, stageLookupEmpty, 1)
+		} else {
+			c.countHash(req.source, stageLookupFound, 1)
+			c.countHash(req.source, stagePeersSum, len(found))
+		}
+
+		var peers []netip.AddrPort
+		if req.source == dht.QAnnouncePeer {
+			peers = append(append(peers, req.peers...), found...)
+		} else {
+			peers = append(append(peers, found...), req.peers...)
+		}
+
+		if len(peers) == 0 {
+			return
+		}
+
+		c.forwardPeers(ctx, req.nodeHasPeersForHash, peers)
+	})
+}
+
+func (c *crawler) forwardPeers(ctx context.Context, req nodeHasPeersForHash, peers []netip.AddrPort) {
+	hashPeers := make([]ktable.HashPeer, 0, len(peers))
+	for _, p := range peers {
+		hashPeers = append(hashPeers, ktable.HashPeer{
+			Addr: p,
+		})
+	}
+
+	c.kTable.BatchCommand(
+		ktable.PutHash{ID: req.infoHash, Peers: hashPeers},
+	)
+
+	select {
+	case <-ctx.Done():
+	case c.requestMetaInfo.In() <- infoHashWithPeers{
+		nodeHasPeersForHash: req,
+		peers:               peers,
+	}:
+	}
 }
 
 func (c *crawler) requestPeersForHash(

@@ -42,6 +42,7 @@ type crawler struct {
 	nodesForSampleInfoHashes     concurrency.BufferedConcurrentChannel[ktable.Node]
 	infoHashTriage               concurrency.BatchingChannel[nodeHasPeersForHash]
 	getPeers                     concurrency.BufferedConcurrentChannel[nodeHasPeersForHash]
+	lookups                      concurrency.BufferedConcurrentChannel[lookupRequest]
 	scrape                       concurrency.BufferedConcurrentChannel[nodeHasPeersForHash]
 	requestMetaInfo              concurrency.BufferedConcurrentChannel[infoHashWithPeers]
 	persistTorrents              concurrency.BatchingChannel[infoHashWithMetaInfo]
@@ -80,6 +81,7 @@ func (c *crawler) start() {
 	go c.runInfoHashTriage(ctx, "triage_inbound", c.inboundTriage)
 	go c.runInboundHashes(ctx)
 	go c.runGetPeers(ctx)
+	go c.runLookups(ctx)
 	go c.runRequestMetaInfo(ctx)
 	go c.runScrape(ctx)
 	go c.reseedBootstrapNodes(ctx)
@@ -102,6 +104,7 @@ const (
 	stageLookupEmpty   = "lookup_empty"
 	stageLookupQueries = "lookup_queries"
 	stageScrapeDropped = "scrape_dropped"
+	stageLookupDropped = "lookup_dropped"
 	sourceSample       = "sample_infohashes"
 	stageDiscovered    = "discovered"
 	stageNeedsMetaInfo = "needs_metainfo"

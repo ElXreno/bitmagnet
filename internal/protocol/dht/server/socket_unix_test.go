@@ -50,11 +50,11 @@ func TestIPv4SocketFamily(t *testing.T) {
 func TestSocketOpenByFamily(t *testing.T) {
 	t.Parallel()
 
-	unopened, ok := newSocket().(*socket)
+	unopened, ok := newSocket("").(*socket)
 	require.True(t, ok)
 	require.NoError(t, unopened.Close())
 
-	s4, ok := newSocket().(*socket)
+	s4, ok := newSocket("").(*socket)
 	require.True(t, ok)
 	require.NoError(t, s4.Open(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), 0)))
 
@@ -62,7 +62,7 @@ func TestSocketOpenByFamily(t *testing.T) {
 
 	assert.Equal(t, unix.AF_INET, socketOption(t, s4.fd, unix.SOL_SOCKET, unix.SO_DOMAIN))
 
-	s6, ok := newSocket().(*socket)
+	s6, ok := newSocket("").(*socket)
 	require.True(t, ok)
 
 	if err := s6.Open(netip.AddrPortFrom(netip.IPv6Loopback(), 0)); err != nil {
@@ -72,4 +72,24 @@ func TestSocketOpenByFamily(t *testing.T) {
 	defer func() { _ = s6.Close() }()
 
 	assert.Equal(t, unix.AF_INET6, socketOption(t, s6.fd, unix.SOL_SOCKET, unix.SO_DOMAIN))
+}
+
+func TestSocketBoundToAnInterface(t *testing.T) {
+	t.Parallel()
+
+	bound, ok := newSocket("lo").(*socket)
+	require.True(t, ok)
+
+	if err := bound.Open(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), 0)); err != nil {
+		t.Skipf("this host does not let the test bind to lo: %s", err)
+	}
+
+	defer func() { _ = bound.Close() }()
+
+	device, err := unix.GetsockoptString(bound.fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE)
+	require.NoError(t, err)
+	assert.Equal(t, "lo", device)
+
+	missing := newSocket("no-such-dev0")
+	require.Error(t, missing.Open(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), 0)))
 }

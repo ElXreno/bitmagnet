@@ -10,12 +10,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func newSocket() Socket {
-	return &socket{fd: -1}
+func newSocket(device string) Socket {
+	return &socket{fd: -1, device: device}
 }
 
 type socket struct {
-	fd int
+	fd     int
+	device string
 }
 
 func (s *socket) Open(localAddr netip.AddrPort) error {
@@ -27,6 +28,14 @@ func (s *socket) Open(localAddr netip.AddrPort) error {
 	fd, sockErr := newSocketFD(localAddr.Addr().Is6())
 	if sockErr != nil {
 		return sockErr
+	}
+
+	if s.device != "" {
+		if optErr := unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, s.device); optErr != nil {
+			_ = unix.Close(fd)
+
+			return fmt.Errorf("error binding to the interface %s: %w", s.device, optErr)
+		}
 	}
 
 	if bindErr := unix.Bind(fd, sAddr); bindErr != nil {

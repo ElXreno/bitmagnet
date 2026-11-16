@@ -27,9 +27,9 @@ type server struct {
 	stopped          chan struct{}
 	mutex            sync.Mutex
 	localAddr        netip.AddrPort
-	socket           Socket
+	sockets          []Socket
 	localAddr6       netip.AddrPort
-	socket6          Socket
+	sockets6         []Socket
 	queryTimeout     time.Duration
 	queries          map[string]chan dht.RecvMsg
 	responder        responder.Responder
@@ -39,21 +39,17 @@ type server struct {
 }
 
 func (s *server) start() error {
-	if err := s.socket.Open(s.localAddr); err != nil {
+	if err := openAll(s.sockets, s.localAddr); err != nil {
 		return fmt.Errorf("could not open socket: %w", err)
 	}
 
-	sockets := []Socket{s.socket}
+	if err := openAll(s.sockets6, s.localAddr6); err != nil {
+		s.logger.Warnw("could not open the IPv6 socket, continuing with IPv4 only", "error", err)
 
-	if s.socket6 != nil {
-		if err := s.socket6.Open(s.localAddr6); err != nil {
-			s.logger.Warnw("could not open the IPv6 socket, continuing with IPv4 only", "error", err)
-
-			s.socket6 = nil
-		} else {
-			sockets = append(sockets, s.socket6)
-		}
+		s.sockets6 = nil
 	}
+
+	sockets := append(append([]Socket(nil), s.sockets...), s.sockets6...)
 
 	go func() {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -77,8 +73,22 @@ func (s *server) stop() {
 	close(s.stopped)
 }
 
+func openAll(sockets []Socket, localAddr netip.AddrPort) error {
+	for n, socket := range sockets {
+		if err := socket.Open(localAddr); err != nil {
+			for _, opened := range sockets[:n] {
+				_ = opened.Close()
+			}
+
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (s *server) IPv6() bool {
-	return s.socket6 != nil
+	return len(s.sockets6) > 0
 }
 
 func (s *server) read(ctx context.Context, socket Socket) {
@@ -132,14 +142,15 @@ func (s *server) read(ctx context.Context, socket Socket) {
 
 		switch msg.Y {
 		case dht.YQuery:
-			go s.handleQuery(ctx, recvMsg)
+			go s.handleQuery(ctx, recvMsg, socket)
 		case dht.YResponse, dht.YError:
 			go s.handleResponse(recvMsg)
 		}
 	}
 }
 
-func (s *server) handleQuery(ctx context.Context, msg dht.RecvMsg) {
+// handleQuery answers through the socket the query came in on, so the answer leaves from the address that was asked
+func (s *server) handleQuery(ctx context.Context, msg dht.RecvMsg, via Socket) {
 	ctx, cancel := context.WithTimeout(ctx, s.responderTimeout)
 	defer cancel()
 
@@ -165,7 +176,9 @@ func (s *server) handleQuery(ctx context.Context, msg dht.RecvMsg) {
 		res.R = &ret
 	}
 
-	if sendErr := s.send(msg.From, res); sendErr != nil {
+	from := netip.AddrPortFrom(msg.From.Addr().Unmap(), msg.From.Port())
+
+	if sendErr := sendVia(via, from, res); sendErr != nil {
 		s.logger.Debugw("could not send response", "msg", msg, "retErr", sendErr)
 	}
 }
@@ -242,33 +255,49 @@ func (s *server) Query(
 }
 
 func (s *server) send(addr netip.AddrPort, msg dht.Msg) error {
-	data, encodeErr := bencode.Marshal(msg)
-	if encodeErr != nil {
-		return encodeErr
-	}
-
 	socket, addr, socketErr := s.socketFor(addr)
 	if socketErr != nil {
 		return socketErr
 	}
 
-	sendErr := socket.Send(addr, data)
-	if sendErr != nil {
-		return sendErr
-	}
-
-	return nil
+	return sendVia(socket, addr, msg)
 }
 
-func (s *server) socketFor(addr netip.AddrPort) (Socket, netip.AddrPort, error) {
-	addr = netip.AddrPortFrom(addr.Addr().Unmap(), addr.Port())
-	if !addr.Addr().Is6() {
-		return s.socket, addr, nil
+func sendVia(socket Socket, addr netip.AddrPort, msg dht.Msg) error {
+	data, encodeErr := bencode.Marshal(msg)
+	if encodeErr != nil {
+		return encodeErr
 	}
 
-	if s.socket6 == nil {
+	return socket.Send(addr, data)
+}
+
+// socketFor keeps one remote host on one socket, so it always sees the same address of ours
+func (s *server) socketFor(addr netip.AddrPort) (Socket, netip.AddrPort, error) {
+	addr = netip.AddrPortFrom(addr.Addr().Unmap(), addr.Port())
+
+	sockets := s.sockets
+	if addr.Addr().Is6() {
+		sockets = s.sockets6
+	}
+
+	if len(sockets) == 0 {
 		return nil, addr, ErrNoIPv6
 	}
 
-	return s.socket6, addr, nil
+	return sockets[exitOf(addr.Addr(), len(sockets))], addr, nil
+}
+
+func exitOf(addr netip.Addr, exits int) int {
+	if exits < 2 {
+		return 0
+	}
+
+	hash := uint32(2166136261)
+
+	for _, b := range addr.As16() {
+		hash = (hash ^ uint32(b)) * 16777619
+	}
+
+	return int(hash % uint32(exits))
 }

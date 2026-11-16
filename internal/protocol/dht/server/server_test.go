@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anacrolix/torrent/bencode"
 	"github.com/bitmagnet-io/bitmagnet/internal/concurrency"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht"
@@ -21,12 +22,18 @@ import (
 	"golang.org/x/time/rate"
 )
 
+type datagram struct {
+	data []byte
+	from netip.AddrPort
+}
+
 type fakeSocket struct {
 	openErr error
 	mu      sync.Mutex
 	sent    []netip.AddrPort
 	closed  chan struct{}
 	once    sync.Once
+	inbox   chan datagram
 }
 
 func newFakeSocket(openErr error) *fakeSocket {
@@ -52,10 +59,13 @@ func (f *fakeSocket) Send(addr netip.AddrPort, _ []byte) error {
 	return nil
 }
 
-func (f *fakeSocket) Receive([]byte) (int, netip.AddrPort, error) {
-	<-f.closed
-
-	return 0, netip.AddrPort{}, errors.New("closed")
+func (f *fakeSocket) Receive(buffer []byte) (int, netip.AddrPort, error) {
+	select {
+	case d := <-f.inbox:
+		return copy(buffer, d.data), d.from, nil
+	case <-f.closed:
+		return 0, netip.AddrPort{}, errors.New("closed")
+	}
 }
 
 func (f *fakeSocket) sentTo() []netip.AddrPort {
@@ -87,11 +97,19 @@ func (r *fixedResponder) seen() []netip.AddrPort {
 	return append([]netip.AddrPort(nil), r.from...)
 }
 
+func present(socket Socket) []Socket {
+	if socket == nil {
+		return nil
+	}
+
+	return []Socket{socket}
+}
+
 func newTestServer(socket Socket, socket6 Socket, logger *zap.SugaredLogger) *server {
 	return &server{
 		stopped:          make(chan struct{}),
-		socket:           socket,
-		socket6:          socket6,
+		sockets:          []Socket{socket},
+		sockets6:         present(socket6),
 		queries:          make(map[string]chan dht.RecvMsg),
 		queryTimeout:     20 * time.Millisecond,
 		responder:        &fixedResponder{},
@@ -187,15 +205,15 @@ func TestIPv6Switch(t *testing.T) {
 
 	t.Setenv(dht.IPv6Env, "off")
 
-	off := newBaseServer(params)
-	assert.Nil(t, off.socket6)
+	off := newBaseServer(params, nil)
+	assert.Empty(t, off.sockets6)
 	assert.False(t, off.IPv6())
 	assert.Equal(t, netip.AddrPortFrom(netip.IPv4Unspecified(), params.Config.Port), off.localAddr)
 
 	t.Setenv(dht.IPv6Env, "")
 
-	on := newBaseServer(params)
-	assert.NotNil(t, on.socket6)
+	on := newBaseServer(params, nil)
+	assert.Len(t, on.sockets6, 1)
 	assert.Equal(t, netip.AddrPortFrom(netip.IPv4Unspecified(), params.Config.Port), on.localAddr)
 	assert.Equal(t, netip.AddrPortFrom(netip.IPv6Unspecified(), params.Config.Port), on.localAddr6)
 }
@@ -307,4 +325,92 @@ func TestWrappedServerCountsQueriesByFamily(t *testing.T) {
 	limited := familyCounts(t, limiterWaitTotal)
 	assert.GreaterOrEqual(t, limited[dht.FamilyIPv4], 1.0)
 	assert.GreaterOrEqual(t, limited[dht.FamilyIPv6], 2.0)
+}
+
+func hostOnExit(t *testing.T, exit int, exits int) netip.AddrPort {
+	t.Helper()
+
+	for n := range 255 {
+		addr := netip.AddrFrom4([4]byte{192, 0, 2, byte(n + 1)})
+		if exitOf(addr, exits) == exit {
+			return netip.AddrPortFrom(addr, 6881)
+		}
+	}
+
+	t.Fatal("no address hashes to the exit")
+
+	return netip.AddrPort{}
+}
+
+func TestQueryKeepsAHostOnOneExit(t *testing.T) {
+	t.Parallel()
+
+	first, second := newFakeSocket(nil), newFakeSocket(nil)
+	s := newTestServer(first, nil, zap.NewNop().Sugar())
+	s.sockets = []Socket{first, second}
+
+	require.NoError(t, s.start())
+	defer s.stop()
+
+	hosts := make(map[netip.AddrPort]int)
+
+	for n := range 40 {
+		host := netip.AddrPortFrom(netip.AddrFrom4([4]byte{198, 51, 100, byte(n + 1)}), 6881)
+		hosts[host] = exitOf(host.Addr(), 2)
+
+		for range 2 {
+			_, _ = s.Query(context.Background(), host, dht.QPing, dht.MsgArgs{})
+		}
+	}
+
+	for exit, socket := range []*fakeSocket{first, second} {
+		sent := socket.sentTo()
+		assert.NotEmpty(t, sent, "exit %d carries no host", exit)
+
+		for _, host := range sent {
+			assert.Equal(t, exit, hosts[host], "host %s left through a second exit", host)
+		}
+	}
+
+	assert.Len(t, append(first.sentTo(), second.sentTo()...), 80)
+}
+
+func TestAnswerLeavesThroughTheSocketOfTheQuery(t *testing.T) {
+	t.Parallel()
+
+	first, second := newFakeSocket(nil), newFakeSocket(nil)
+	second.inbox = make(chan datagram, 1)
+
+	s := newTestServer(first, nil, zap.NewNop().Sugar())
+	s.sockets = []Socket{first, second}
+
+	require.NoError(t, s.start())
+	defer s.stop()
+
+	asker := hostOnExit(t, 0, 2)
+	query, err := bencode.Marshal(dht.Msg{Q: dht.QPing, T: "aa", Y: dht.YQuery, A: &dht.MsgArgs{}})
+	require.NoError(t, err)
+
+	second.inbox <- datagram{data: query, from: asker}
+
+	require.Eventually(t, func() bool { return len(second.sentTo()) == 1 }, time.Second, 5*time.Millisecond)
+	assert.Equal(t, []netip.AddrPort{asker}, second.sentTo())
+	assert.Empty(t, first.sentTo(), "the answer left through the exit the host hashes to, not the one it asked")
+}
+
+func TestInterfacesGetASocketEach(t *testing.T) {
+	params := Params{Config: NewDefaultConfig(), Logger: zap.NewNop().Sugar()}
+
+	t.Setenv(dht.IPv6Env, "")
+	t.Setenv(InterfacesEnv, " tun0, tun1 ,")
+
+	two := newBaseServer(params, newExitPackets())
+	assert.Len(t, two.sockets, 2)
+	assert.Len(t, two.sockets6, 2)
+
+	t.Setenv(InterfacesEnv, "")
+
+	one := newBaseServer(params, nil)
+	assert.Len(t, one.sockets, 1)
+	assert.Len(t, one.sockets6, 1)
 }

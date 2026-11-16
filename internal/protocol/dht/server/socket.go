@@ -16,5 +16,10 @@ type Socket interface {
 }
 
 func NewSocket() Socket {
-	return newSocket()
+	return newSocket("")
+}
+
+// NewSocketOn makes a socket that sends and receives only through one network interface.
+func NewSocketOn(device string) Socket {
+	return newSocket(device)
 }

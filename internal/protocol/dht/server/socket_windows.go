@@ -10,14 +10,19 @@ import (
 )
 
 type socket struct {
-	fd windows.Handle
+	fd     windows.Handle
+	device string
 }
 
-func newSocket() Socket {
-	return &socket{fd: windows.InvalidHandle}
+func newSocket(device string) Socket {
+	return &socket{fd: windows.InvalidHandle, device: device}
 }
 
 func (s *socket) Open(localAddr netip.AddrPort) error {
+	if s.device != "" {
+		return errors.New("binding a socket to an interface is not supported on Windows")
+	}
+
 	sAddr, addrErr := addrPortToSockaddr(localAddr)
 	if addrErr != nil {
 		return addrErr

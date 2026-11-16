@@ -130,3 +130,64 @@ func TestWriteFileAtomicKeepsTheOldFileOnFailure(t *testing.T) {
 		t.Fatalf("a write left %d files", len(entries))
 	}
 }
+
+func TestFailedHashesAreReleasedOverTheHourWhenSmooth(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	clock := time.Unix(1_700_000_000, 0).Truncate(time.Hour).Add(10 * time.Minute)
+
+	f, err := newFailedHashes(dir, 2*time.Hour, time.Hour, 1000, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.now = func() time.Time { return clock }
+
+	early, late := protocol.ID{1}, protocol.ID{2}
+	early[16], late[16] = 0x20, 0xe0
+
+	f.add(early)
+	f.add(late)
+
+	for _, step := range []struct {
+		after    time.Duration
+		held     [2]bool
+		released [2]bool
+	}{
+		{0, [2]bool{true, true}, [2]bool{false, false}},
+		{110 * time.Minute, [2]bool{true, true}, [2]bool{false, false}},
+		{20 * time.Minute, [2]bool{false, true}, [2]bool{true, false}},
+		{40 * time.Minute, [2]bool{false, false}, [2]bool{true, true}},
+		{59 * time.Minute, [2]bool{false, false}, [2]bool{true, true}},
+		{time.Minute, [2]bool{false, false}, [2]bool{false, false}},
+	} {
+		clock = clock.Add(step.after)
+
+		if err := f.save(); err != nil {
+			t.Fatal(err)
+		}
+
+		// newFailedHashes reads the real clock, so load with a memory long enough to cover the fixed test time.
+		reloaded, err := newFailedHashes(dir, time.Since(clock)+3*time.Hour, time.Hour, 1000, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		reloaded.now = f.now
+		reloaded.keep = 2
+
+		for _, memory := range []*failedHashes{f, reloaded} {
+			if got := [2]bool{memory.test(early), memory.test(late)}; got != step.held {
+				t.Fatalf("at %s held: want %v, got %v", clock.Format("15:04"), step.held, got)
+			}
+
+			released := [2]bool{
+				!memory.test(early) && memory.released(early), !memory.test(late) && memory.released(late),
+			}
+			if released != step.released {
+				t.Fatalf("at %s released: want %v, got %v", clock.Format("15:04"), step.released, released)
+			}
+		}
+	}
+}

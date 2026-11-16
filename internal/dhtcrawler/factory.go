@@ -194,7 +194,8 @@ func New(params Params) Result {
 
 					if os.Getenv("BITMAGNET_FAILED_MEMORY") != "off" {
 						failed, err = newFailedHashes(
-							"failed_hashes", time.Duration(envInt("BITMAGNET_FAILED_TTL_HOURS", 6))*time.Hour, time.Hour, 4_000_000)
+							"failed_hashes", time.Duration(envInt("BITMAGNET_FAILED_TTL_HOURS", 6))*time.Hour, time.Hour, 4_000_000,
+							os.Getenv("BITMAGNET_FAILED_SMOOTH") == "on")
 						if err != nil {
 							return err
 						}

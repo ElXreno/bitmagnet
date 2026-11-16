@@ -130,6 +130,10 @@ func (c *crawler) runInfoHashTriage(
 						c.countHash(r.source, stageNeedsMetaInfo+"_"+r.visit, 1)
 					}
 
+					if c.failed.released(r.infoHash) {
+						c.countHash(r.source, stageNeedsMetaInfo+"_retry", 1)
+					}
+
 					c.trackers.submit(r.infoHash)
 					c.trackers6.submit(r.infoHash)
 

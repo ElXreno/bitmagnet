@@ -2,6 +2,7 @@ package dhtcrawler
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -23,7 +24,7 @@ const (
 
 // failedHashes remembers, across restarts, the info hashes whose meta info could not be fetched, so that the
 // crawler does not spend packets on the same dead torrents again until the memory expires. It keeps one bloom
-// filter per hour and forgets an hour as a whole.
+// filter per hour and forgets an hour as a whole, or, when smooth, hash by hash over the following hour.
 type failedHashes struct {
 	mu          sync.Mutex
 	saving      sync.Mutex
@@ -31,12 +32,15 @@ type failedHashes struct {
 	span        time.Duration
 	perSpan     uint
 	keep        int64
+	smooth      bool
 	generations map[int64]*boom.BloomFilter
 	dirty       map[int64]bool
 	now         func() time.Time
 }
 
-func newFailedHashes(dir string, ttl time.Duration, span time.Duration, perSpan uint) (*failedHashes, error) {
+func newFailedHashes(
+	dir string, ttl time.Duration, span time.Duration, perSpan uint, smooth ...bool,
+) (*failedHashes, error) {
 	if ttl <= 0 {
 		return nil, nil //nolint:nilnil
 	}
@@ -46,6 +50,7 @@ func newFailedHashes(dir string, ttl time.Duration, span time.Duration, perSpan 
 		span:        span,
 		perSpan:     perSpan,
 		keep:        int64(ttl / span),
+		smooth:      len(smooth) > 0 && smooth[0],
 		generations: make(map[int64]*boom.BloomFilter),
 		dirty:       make(map[int64]bool),
 		now:         time.Now,
@@ -76,7 +81,7 @@ func newFailedHashes(dir string, ttl time.Duration, span time.Duration, perSpan 
 
 		path := filepath.Join(dir, name)
 
-		if generation <= current-f.keep || generation > current {
+		if generation <= current-f.keep-f.extra() || generation > current {
 			_ = os.Remove(path)
 
 			continue
@@ -115,6 +120,51 @@ func (f *failedHashes) test(hash protocol.ID) bool {
 
 	for generation, filter := range f.generations {
 		if generation > oldest && filter.Test(hash[:]) {
+			return true
+		}
+	}
+
+	if filter, ok := f.generations[oldest]; ok && f.smooth {
+		return f.position(hash) >= f.phase() && filter.Test(hash[:])
+	}
+
+	return false
+}
+
+// extra is how many generations past their term stay loaded: the one being released and the one before it
+func (f *failedHashes) extra() int64 {
+	if f.smooth {
+		return 2
+	}
+
+	return 0
+}
+
+// phase is the part of the current span that has passed, from 0 to 1
+func (f *failedHashes) phase() float64 {
+	span := int64(f.span / time.Second)
+
+	return float64(f.now().Unix()%span) / float64(span)
+}
+
+// position spreads the hashes of a generation over the span in which it is released
+func (*failedHashes) position(hash protocol.ID) float64 {
+	return float64(binary.BigEndian.Uint32(hash[16:])) / (1 << 32)
+}
+
+// released says whether a hash that test no longer holds was given up on within the last two spans
+func (f *failedHashes) released(hash protocol.ID) bool {
+	if f == nil || !f.smooth {
+		return false
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	oldest := f.generation() - f.keep
+
+	for _, generation := range []int64{oldest, oldest - 1} {
+		if filter, ok := f.generations[generation]; ok && filter.Test(hash[:]) {
 			return true
 		}
 	}
@@ -161,7 +211,7 @@ func (f *failedHashes) save() error {
 
 	f.mu.Lock()
 
-	oldest := f.generation() - f.keep
+	oldest := f.generation() - f.keep - f.extra()
 
 	for generation := range f.generations {
 		path := filepath.Join(f.dir, fmt.Sprintf("%s%d%s", failedHashesFilePrefix, generation, failedHashesFileSuffix))

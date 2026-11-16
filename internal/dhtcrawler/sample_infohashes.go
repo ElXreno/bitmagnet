@@ -44,6 +44,17 @@ func (c *crawler) sampleNode(ctx context.Context, f *nodeFamily, n ktable.Node) 
 			return
 		}
 
+		if !f.schedule.due(n.Addr()) {
+			c.countHash("sample_nodes"+f.suffix, "schedule_skipped", 1)
+
+			select {
+			case f.nodesForFindNode.In() <- n:
+			default:
+			}
+
+			return
+		}
+
 		res, err := c.client.SampleInfoHashes(ctx, n.Addr(), c.soughtNodeID.Get())
 		if err != nil {
 			f.kTable.BatchCommand(
@@ -52,6 +63,10 @@ func (c *crawler) sampleNode(ctx context.Context, f *nodeFamily, n ktable.Node) 
 			f.revisits.forget(n.ID())
 
 			return
+		}
+
+		if outcome := f.schedule.record(n.Addr(), res.Samples, time.Duration(res.Interval)*time.Second); outcome != "" {
+			c.countHash("sample_nodes"+f.suffix, outcome, 1)
 		}
 
 		var discoveredHashes []nodeHasPeersForHash

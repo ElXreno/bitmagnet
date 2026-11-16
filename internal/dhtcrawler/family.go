@@ -18,6 +18,7 @@ type nodeFamily struct {
 	nodesForSampleInfoHashes concurrency.BufferedConcurrentChannel[ktable.Node]
 	ignoreNodes              *ignoreFilter
 	sampledNodes             *ignoreFilter
+	schedule                 *sampleSchedule
 	nodePool                 *nodePool
 	discovered               chan ktable.Node
 	revisits                 *revisits
@@ -42,6 +43,7 @@ func newNodeFamily(suffix string, kTable ktable.Table, scalingFactor int, sample
 			bloom: boom.NewStableBloomFilter(20_000_000, 2, 0.001),
 		},
 		nodePool: newNodePool(),
+		schedule: sampleScheduleFromEnv(),
 		revisits: newRevisits(),
 	}
 }

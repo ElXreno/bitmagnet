@@ -119,25 +119,58 @@ type Response struct {
 	Info      metainfo.Info
 	Identity  metainfo.Identity
 	Encrypted bool
+	Dialect   bool
 	Transport string
 }
 
 var errPlainHandshakeClosed = errors.New("peer closed the connection during the plaintext handshake")
 
 func (r requester) Request(ctx context.Context, infoHash protocol.ID, addr netip.AddrPort) (Response, error) {
-	res, err := r.request(ctx, infoHash, addr, false)
+	res, err := r.request(ctx, infoHash, addr, false, peer_protocol.Protocol)
 	if err == nil || !errors.Is(err, errPlainHandshakeClosed) {
 		return res, err
 	}
 
-	res, mseErr := r.request(ctx, infoHash, addr, true)
-	if mseErr != nil {
-		return Response{}, fmt.Errorf("mse retry: %w", mseErr)
+	res, mseErr := r.request(ctx, infoHash, addr, true, peer_protocol.Protocol)
+	if mseErr == nil {
+		res.Encrypted = true
+
+		return res, nil
 	}
 
-	res.Encrypted = true
+	if dialDialect && handshakeClosed(mseErr) {
+		res, dialectErr := r.request(ctx, infoHash, addr, false, dialectProtocol)
+		if dialectErr == nil {
+			dialectDialTotal.WithLabelValues("ok").Inc()
 
-	return res, nil
+			res.Dialect = true
+
+			return res, nil
+		}
+
+		dialectDialTotal.WithLabelValues(dialectResult(dialectErr)).Inc()
+	}
+
+	return Response{}, fmt.Errorf("mse retry: %w", mseErr)
+}
+
+var dialDialect = os.Getenv("BITMAGNET_DIAL_DIALECT") == "on"
+
+func handshakeClosed(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET)
+}
+
+func dialectResult(err error) string {
+	var peerErr *PeerError
+
+	switch {
+	case errors.As(err, &peerErr):
+		return "answered"
+	case handshakeClosed(err):
+		return "closed"
+	default:
+		return "failed"
+	}
 }
 
 func (r requester) request(
@@ -145,6 +178,7 @@ func (r requester) request(
 	infoHash protocol.ID,
 	addr netip.AddrPort,
 	encrypted bool,
+	proto string,
 ) (Response, error) {
 	timeoutCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
@@ -193,7 +227,7 @@ func (r requester) request(
 		rw = encRw
 	}
 
-	hsInfo, btHandshakeErr := btHandshake(rw, infoHash, r.clientID)
+	hsInfo, btHandshakeErr := btHandshake(rw, proto, infoHash, r.clientID)
 	if btHandshakeErr != nil {
 		if !encrypted && (errors.Is(btHandshakeErr, io.EOF) || errors.Is(btHandshakeErr, io.ErrUnexpectedEOF) ||
 			errors.Is(btHandshakeErr, syscall.ECONNRESET)) {
@@ -247,7 +281,7 @@ func (r requester) request(
 		return failed("pieces_failed", requestAllPiecesErr)
 	}
 
-	pieces, readAllPiecesErr := readAllPieces(rw, metadataSize)
+	pieces, readAllPiecesErr := readAllPieces(rw, metadataSize, nil)
 	if readAllPiecesErr != nil {
 		return failed("pieces_failed", readAllPiecesErr)
 	}
@@ -322,9 +356,9 @@ const extendedHandshake = "\x00\x00\x00\x1a\x14\x00d1:md11:ut_metadatai1eee"
 
 var myExBits = NewPeerExtensionBits(ExtensionBitDht, ExtensionBitLtep)
 
-func btHandshake(rw io.ReadWriter, infoHash protocol.ID, clientID protocol.ID) (HandshakeInfo, error) {
+func btHandshake(rw io.ReadWriter, proto string, infoHash protocol.ID, clientID protocol.ID) (HandshakeInfo, error) {
 	handshakeBytes := make([]byte, 0, 68+len(extendedHandshake))
-	handshakeBytes = append(handshakeBytes, peer_protocol.Protocol...)
+	handshakeBytes = append(handshakeBytes, proto...)
 	handshakeBytes = append(handshakeBytes, myExBits[:]...)
 	handshakeBytes = append(handshakeBytes, infoHash[:]...)
 	handshakeBytes = append(handshakeBytes, clientID[:]...)
@@ -344,7 +378,7 @@ func btHandshake(rw io.ReadWriter, infoHash protocol.ID, clientID protocol.ID) (
 			fmt.Errorf("failed to read all handshake bytes (%d): %w / %s", n, hsErr, infoHash.String())
 	}
 
-	if !bytes.HasPrefix(handshakeResponse, []byte(peer_protocol.Protocol)) {
+	if !bytes.HasPrefix(handshakeResponse, []byte(proto)) {
 		return HandshakeInfo{}, errors.New("invalid handshake response received")
 	}
 
@@ -456,11 +490,21 @@ func readExHandshakeDict(r io.Reader) (*rootDict, error) {
 }
 
 func requestAllPieces(w io.Writer, metadataSize uint, utMetadata uint8) error {
-	nPieces := int(math.Ceil(float64(metadataSize) / math.Pow(2, 14)))
-	for piece := range nPieces {
+	nPieces := uint(math.Ceil(float64(metadataSize) / math.Pow(2, 14)))
+	pieces := make([]uint, nPieces)
+
+	for piece := range pieces {
+		pieces[piece] = uint(piece)
+	}
+
+	return requestPieces(w, pieces, utMetadata)
+}
+
+func requestPieces(w io.Writer, pieces []uint, utMetadata uint8) error {
+	for _, piece := range pieces {
 		extDictDump, err := bencode.Marshal(extDict{
 			MsgType: 0,
-			Piece:   piece,
+			Piece:   int(piece),
 		})
 		if err != nil { // ASSERT
 			panic(err)
@@ -485,56 +529,85 @@ func uintToBigEndian4(i uint) []byte {
 	return b
 }
 
-func readAllPieces(r io.Reader, metadataSize uint) ([]byte, error) {
+// readPiece returns the next meta info piece a peer sends, checked against the size it must have
+func readPiece(r io.Reader, metadataSize uint) (uint, []byte, error) {
 	nPieces := (metadataSize + metadataPieceSize - 1) / metadataPieceSize
-	received := make(map[uint][]byte)
 
-	for uint(len(received)) < nPieces {
+	for {
 		rUmMessage, err := readUmMessage(r)
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 		// run TestDecoder() function in leech_test.go in case you have any doubts.
 		if bencodeUnsafe(rUmMessage[2:], incomingMaxDepth) {
-			return nil, errIncomingBencode
+			return 0, nil, errIncomingBencode
 		}
 
 		rMessageBuf := bytes.NewBuffer(rUmMessage[2:])
 		rExtDict := new(extDict)
 
 		if decodeErr := bencode.NewDecoder(rMessageBuf).Decode(rExtDict); decodeErr != nil {
-			return nil, decodeErr
+			return 0, nil, decodeErr
 		}
 
 		if rExtDict.MsgType == 2 { // reject
-			return nil, errors.New("remote peer rejected sending metadataBytes")
+			return 0, nil, fmt.Errorf("remote peer rejected sending metadata piece %d", rExtDict.Piece)
 		}
 
-		if rExtDict.MsgType == 1 { // data
-			piece := rExtDict.Piece
-			if piece < 0 || uint(piece) >= nPieces {
-				return nil, errors.New("piece index out of range")
-			}
-
-			index := uint(piece)
-
-			// BEP 9: every piece is 16kiB except the last one
-			wantLen := uint(metadataPieceSize)
-			if index == nPieces-1 {
-				wantLen = metadataSize - index*metadataPieceSize
-			}
-
-			metadataPiece := rMessageBuf.Bytes()
-			if uint(len(metadataPiece)) != wantLen {
-				return nil, errors.New("metadata piece has the wrong length for its index")
-			}
-
-			if _, duplicate := received[index]; duplicate {
-				return nil, errors.New("duplicate metadata piece")
-			}
-
-			received[index] = metadataPiece
+		if rExtDict.MsgType != 1 { // data
+			continue
 		}
+
+		piece := rExtDict.Piece
+		if piece < 0 || uint(piece) >= nPieces {
+			return 0, nil, errors.New("piece index out of range")
+		}
+
+		index := uint(piece)
+
+		// BEP 9: every piece is 16kiB except the last one
+		wantLen := uint(metadataPieceSize)
+		if index == nPieces-1 {
+			wantLen = metadataSize - index*metadataPieceSize
+		}
+
+		metadataPiece := rMessageBuf.Bytes()
+		if uint(len(metadataPiece)) != wantLen {
+			return 0, nil, errors.New("metadata piece has the wrong length for its index")
+		}
+
+		return index, metadataPiece, nil
+	}
+}
+
+// readAllPieces asks reserve for every piece as it arrives and once more for the assembled copy
+func readAllPieces(r io.Reader, metadataSize uint, reserve func(uint) error) ([]byte, error) {
+	if reserve == nil {
+		reserve = func(uint) error { return nil }
+	}
+
+	nPieces := (metadataSize + metadataPieceSize - 1) / metadataPieceSize
+	received := make(map[uint][]byte)
+
+	for uint(len(received)) < nPieces {
+		index, metadataPiece, err := readPiece(r, metadataSize)
+		if err != nil {
+			return nil, err
+		}
+
+		if _, duplicate := received[index]; duplicate {
+			return nil, errors.New("duplicate metadata piece")
+		}
+
+		if err := reserve(uint(len(metadataPiece))); err != nil {
+			return nil, err
+		}
+
+		received[index] = metadataPiece
+	}
+
+	if err := reserve(metadataSize); err != nil {
+		return nil, err
 	}
 
 	metadataBytes := make([]byte, 0, metadataSize)

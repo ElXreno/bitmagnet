@@ -340,6 +340,8 @@ func (c *crawler) doRequestMetaInfo(
 			result = "ok_utp"
 		case r.silent && result == "utp_dial_failed":
 			result = "utp_silent_dial_failed"
+		case r.err == nil && r.res.Dialect:
+			result = "ok_dialect"
 		case r.err == nil && r.res.Encrypted:
 			result = "ok_mse"
 		}

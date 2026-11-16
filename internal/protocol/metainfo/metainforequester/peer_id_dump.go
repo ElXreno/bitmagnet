@@ -11,10 +11,13 @@ import (
 
 const (
 	peerIDDumpLimit      = 300_000
-	peerIDDumpVersionLen = 40
+	peerIDDumpVersionLen = 160
 )
 
-var peerIDDumpPath = os.Getenv("BITMAGNET_DUMP_PEER_IDS")
+var (
+	peerIDDumpPath  = os.Getenv("BITMAGNET_DUMP_PEER_IDS")
+	peerIDDumpStage = os.Getenv("BITMAGNET_DUMP_PEER_STAGE")
+)
 
 var peerIDDump = struct {
 	mu    sync.Mutex
@@ -30,7 +33,7 @@ func dumpPeerID(
 	outcome string,
 	version string,
 ) {
-	if peerIDDumpPath == "" {
+	if peerIDDumpPath == "" || (peerIDDumpStage != "" && outcome != peerIDDumpStage) {
 		return
 	}
 

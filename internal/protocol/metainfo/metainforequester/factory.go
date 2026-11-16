@@ -33,6 +33,9 @@ type Result struct {
 	LimiterWaitSeconds  prometheus.Collector `group:"prometheus_collectors"`
 	LimiterResultTotal  prometheus.Collector `group:"prometheus_collectors"`
 	PeerClientTotal     prometheus.Collector `group:"prometheus_collectors"`
+	DialectDialTotal    prometheus.Collector `group:"prometheus_collectors"`
+	PeerBytesTotal      prometheus.Collector `group:"prometheus_collectors"`
+	PiecesFailedTotal   prometheus.Collector `group:"prometheus_collectors"`
 	PeerExtensionTotal  prometheus.Collector `group:"prometheus_collectors"`
 }
 
@@ -71,7 +74,7 @@ func New(p Params) Result {
 			},
 			limiter: concurrency.NewKeyedLimiter(rate.Every(time.Second/8), 8, 100_000, time.Second*20),
 		},
-		Receiver:            NewReceiver(clientID, IncomingTimeout),
+		Receiver:            NewReceiver(clientID, incomingTimeoutFromEnv()),
 		RequestDuration:     collector.requestDuration,
 		RequestSuccessTotal: collector.requestSuccessTotal,
 		RequestErrorTotal:   collector.requestErrorTotal,
@@ -79,8 +82,19 @@ func New(p Params) Result {
 		LimiterWaitSeconds:  limiterWaitSeconds,
 		LimiterResultTotal:  limiterResultTotal,
 		PeerClientTotal:     peerClientTotal,
+		DialectDialTotal:    dialectDialTotal,
+		PeerBytesTotal:      peerBytesTotal,
+		PiecesFailedTotal:   piecesFailedTotal,
 		PeerExtensionTotal:  peerExtensionTotal,
 	}
+}
+
+func incomingTimeoutFromEnv() time.Duration {
+	if seconds, err := strconv.Atoi(os.Getenv("BITMAGNET_INBOUND_FETCH_SECONDS")); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+
+	return IncomingTimeout
 }
 
 func dialTimeout() time.Duration {

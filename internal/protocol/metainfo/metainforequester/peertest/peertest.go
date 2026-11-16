@@ -29,6 +29,7 @@ type Peer struct {
 	Encrypted    bool
 	NoExtensions bool
 	Silent       bool
+	Pieces       int
 	Prelude      []byte
 }
 
@@ -163,6 +164,10 @@ func (p Peer) Dial(addr string) (Seen, error) {
 
 		if request.MsgType != 0 {
 			continue
+		}
+
+		if p.Pieces > 0 && seen.Requests == p.Pieces {
+			return seen, nil
 		}
 
 		seen.Requests++

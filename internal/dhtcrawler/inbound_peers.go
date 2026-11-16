@@ -473,6 +473,10 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 	entry, kind := p.claim(in.InfoHash, in.Encrypted)
 	c.countHash(sourceInboundPeer, kind, 1)
 
+	if in.Dialect {
+		c.countHash(sourceInboundPeer, "dialect_conn", 1)
+	}
+
 	scraped := ""
 	if entry != nil && entry.class != dhtClassNone {
 		scraped = "_dht" + dhtClassNames[entry.class]
@@ -543,6 +547,10 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 		}
 
 		return "no_metadata_size"
+	case errors.Is(err, metainforequester.ErrFetchedElsewhere):
+		c.countHash(sourceInboundPeer, stageAlreadyFetched, 1)
+
+		return stageAlreadyFetched
 	case errors.Is(err, metainforequester.ErrIncomingBudget):
 		c.countFetchFailed(entry)
 
@@ -580,6 +588,10 @@ func (p *inboundPeers) receive(ctx context.Context, conn net.Conn) string {
 	}
 
 	c.countHash(sourceInboundPeer, stageMetaInfoOK, 1)
+
+	if in.Dialect {
+		c.countHash(sourceInboundPeer, stageMetaInfoOK+"_dialect", 1)
+	}
 
 	if scraped != "" {
 		c.countHash(sourceInboundPeer, stageMetaInfoOK+scraped, 1)

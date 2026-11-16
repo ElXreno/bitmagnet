@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -30,12 +31,12 @@ func TestReadAllPieces(t *testing.T) {
 
 	want := append(append([]byte{}, full...), tail...)
 
-	got, err := readAllPieces(bytes.NewReader(append(piece(1, tail), piece(0, full)...)), metadataPieceSize+100)
+	got, err := readAllPieces(bytes.NewReader(append(piece(1, tail), piece(0, full)...)), metadataPieceSize+100, nil)
 	if err != nil || !bytes.Equal(got, want) {
 		t.Fatalf("pieces that arrive out of order must be assembled in order, got %d bytes, %v", len(got), err)
 	}
 
-	got, err = readAllPieces(bytes.NewReader(append(piece(0, full), piece(1, tail)...)), metadataPieceSize+100)
+	got, err = readAllPieces(bytes.NewReader(append(piece(0, full), piece(1, tail)...)), metadataPieceSize+100, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +66,7 @@ func TestReadAllPieces(t *testing.T) {
 			append(append(piece(0, full), piece(0, full)...), piece(2, tail)...), 2*metadataPieceSize + 100,
 		},
 	} {
-		if _, err := readAllPieces(bytes.NewReader(test.stream), test.size); err == nil {
+		if _, err := readAllPieces(bytes.NewReader(test.stream), test.size, nil); err == nil {
 			t.Errorf("%s: want an error", name)
 		}
 	}
@@ -82,7 +83,7 @@ func TestReadAllPiecesFollowsTheBytesReceived(t *testing.T) {
 	runtime.GC()
 	runtime.ReadMemStats(&before)
 
-	_, err := readAllPieces(bytes.NewReader(stream), declared)
+	_, err := readAllPieces(bytes.NewReader(stream), declared, nil)
 
 	runtime.ReadMemStats(&after)
 
@@ -105,7 +106,7 @@ func TestReadAllPiecesSkipsLargeMessages(t *testing.T) {
 
 	stream := bytes.Join([][]byte{bitfield, piece(0, full), bitfield, piece(1, tail)}, nil)
 
-	got, err := readAllPieces(bytes.NewReader(stream), metadataPieceSize+100)
+	got, err := readAllPieces(bytes.NewReader(stream), metadataPieceSize+100, nil)
 	if err != nil || !bytes.Equal(got, append(append([]byte{}, full...), tail...)) {
 		t.Fatalf("large messages around the pieces must be skipped, got %d bytes, %v", len(got), err)
 	}
@@ -140,7 +141,7 @@ func TestReadMessageLimit(t *testing.T) {
 		t.Fatal("a ut_metadata message beyond the limit must fail")
 	}
 
-	if _, err := readAllPieces(bytes.NewReader(followed), metadataPieceSize); err == nil {
+	if _, err := readAllPieces(bytes.NewReader(followed), metadataPieceSize, nil); err == nil {
 		t.Fatal("an oversize piece must fail the transfer")
 	}
 
@@ -168,7 +169,7 @@ func TestHostileBencodeIsRefusedBeforeDecoding(t *testing.T) {
 			t.Errorf("extended handshake, %s: got %v", name, err)
 		}
 
-		if _, err := readAllPieces(bytes.NewReader(message(1, dict, nil)), 100); !errors.Is(err, errIncomingBencode) {
+		if _, err := readAllPieces(bytes.NewReader(message(1, dict, nil)), 100, nil); !errors.Is(err, errIncomingBencode) {
 			t.Errorf("ut_metadata message, %s: got %v", name, err)
 		}
 	}
@@ -210,5 +211,34 @@ func TestReadExHandshake(t *testing.T) {
 		if !errors.Is(err, test.err) || size != test.size || id != test.id {
 			t.Errorf("%s: got %d, %d, %v", name, size, id, err)
 		}
+	}
+}
+
+func TestPiecesAreReservedAsTheyArrive(t *testing.T) {
+	t.Parallel()
+
+	full := bytes.Repeat([]byte{'a'}, metadataPieceSize)
+	tail := bytes.Repeat([]byte{'b'}, 100)
+	stream := append(piece(0, full), piece(1, tail)...)
+
+	var reserved []uint
+
+	got, err := readAllPieces(bytes.NewReader(stream), metadataPieceSize+100, func(size uint) error {
+		reserved = append(reserved, size)
+
+		return nil
+	})
+	if err != nil || len(got) != metadataPieceSize+100 {
+		t.Fatalf("got %d bytes, err %v", len(got), err)
+	}
+
+	if want := []uint{metadataPieceSize, 100, metadataPieceSize + 100}; !slices.Equal(reserved, want) {
+		t.Fatalf("reserved %v, want a piece at a time and then the assembled copy %v", reserved, want)
+	}
+
+	spent := errors.New("spent")
+
+	if _, err := readAllPieces(bytes.NewReader(stream), metadataPieceSize+100, func(uint) error { return spent }); !errors.Is(err, spent) {
+		t.Fatalf("a refused reservation must end the read, got %v", err)
 	}
 }

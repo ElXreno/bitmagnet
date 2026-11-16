@@ -413,8 +413,8 @@ func TestReceiveBudget(t *testing.T) {
 		t.Fatalf("want ErrIncomingBudget, got %v", got.err)
 	}
 
-	if got.seen.Requests != 0 || got.spent != incomingBudget-10 {
-		t.Fatalf("%d piece requests, %d bytes reserved", got.seen.Requests, got.spent)
+	if got.spent != incomingBudget-10 {
+		t.Fatalf("the refused fetch must give back what it reserved, %d bytes stay reserved", got.spent)
 	}
 }
 

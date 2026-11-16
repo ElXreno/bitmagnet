@@ -3,6 +3,7 @@ package metainforequester
 import (
 	"context"
 	"errors"
+	"io"
 	"net/netip"
 	"time"
 
@@ -65,6 +66,39 @@ var peerClientTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name:      "peer_client_total",
 	Help:      "A counter of peers by BitTorrent client: every handshake, then the one outcome it ended with.",
 }, []string{"client", "stage"})
+
+var peerBytesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: namespace,
+	Subsystem: subsystem,
+	Name:      "peer_bytes_total",
+	Help:      "Bytes an incoming peer sent after its handshake, by the outcome its connection ended with; resumed and partial_* are meta info pieces kept from earlier connections: used, or dropped unused.",
+}, []string{"stage"})
+
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+
+	return n, err
+}
+
+var piecesFailedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: namespace,
+	Subsystem: subsystem,
+	Name:      "pieces_failed_total",
+	Help:      "Incoming meta info transfers that did not finish, by reason, as connections and as the bytes they took.",
+}, []string{"reason", "unit"})
+
+var dialectDialTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: namespace,
+	Subsystem: subsystem,
+	Name:      "dialect_dial_total",
+	Help:      "Outgoing connections retried with the other protocol string after a peer closed both handshakes.",
+}, []string{"result"})
 
 var peerExtensionTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: namespace,

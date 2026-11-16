@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -42,18 +43,28 @@ const (
 )
 
 type Receiver struct {
-	clientID protocol.ID
-	timeout  time.Duration
-	pending  *atomic.Int64
-	parsing  chan struct{}
+	clientID  protocol.ID
+	timeout   time.Duration
+	handshake time.Duration
+	pending   *atomic.Int64
+	parsing   chan struct{}
+}
+
+func incomingHandshakeFromEnv() time.Duration {
+	if ms, err := strconv.Atoi(os.Getenv("BITMAGNET_INBOUND_HANDSHAKE_MS")); err == nil && ms > 0 {
+		return time.Duration(ms) * time.Millisecond
+	}
+
+	return incomingHandshakeTimeout
 }
 
 func NewReceiver(clientID protocol.ID, timeout time.Duration) Receiver {
 	return Receiver{
-		clientID: clientID,
-		timeout:  timeout,
-		pending:  new(atomic.Int64),
-		parsing:  make(chan struct{}, incomingParses),
+		clientID:  clientID,
+		timeout:   timeout,
+		handshake: incomingHandshakeFromEnv(),
+		pending:   new(atomic.Int64),
+		parsing:   make(chan struct{}, incomingParses),
 	}
 }
 
@@ -92,7 +103,7 @@ type readWriter struct {
 }
 
 func (r Receiver) Accept(conn net.Conn, lookup MSELookup) (*Incoming, error) {
-	if err := conn.SetDeadline(time.Now().Add(min(r.timeout, incomingHandshakeTimeout))); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(min(r.timeout, r.handshake))); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrIncomingHandshake, err)
 	}
 

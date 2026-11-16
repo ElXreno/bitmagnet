@@ -1398,7 +1398,7 @@ func TestInboundSwitchAndTrackerMembership(t *testing.T) {
 	if got := c.inbound.config; got != (inboundConfig{
 		maxHashes: 60, hold: time.Second, maxConns: 3, maxPerIP: 8, lateMax: 50_000, lateTTL: 15 * time.Minute,
 		extraMin: 2, extraMax: 3, stateFile: state, dhtPPS: 150, dhtMax: 300_000, dhtTTL: 45 * time.Minute,
-		dhtSeeds: dhtSeedsMeasure,
+		dhtSeeds: dhtSeedsMeasure, dhtWorkers: inboundDHTWorkers,
 	}) {
 		t.Fatalf("want room for two trackers announcing 30 hashes a second for the hold of one second, got %+v", got)
 	}

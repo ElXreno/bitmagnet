@@ -54,21 +54,22 @@ const (
 )
 
 type inboundConfig struct {
-	maxHashes int
-	hold      time.Duration
-	maxConns  int
-	maxPerIP  int
-	lateMax   int
-	lateTTL   time.Duration
-	extraMin  uint32
-	extraMax  int
-	stateFile string
-	dht       bool
-	dhtPPS    int
-	dhtMax    int
-	dhtTTL    time.Duration
-	dhtSeeds  string
-	unknown   bool
+	maxHashes  int
+	hold       time.Duration
+	maxConns   int
+	maxPerIP   int
+	lateMax    int
+	lateTTL    time.Duration
+	extraMin   uint32
+	extraMax   int
+	stateFile  string
+	dht        bool
+	dhtPPS     int
+	dhtWorkers int
+	dhtMax     int
+	dhtTTL     time.Duration
+	dhtSeeds   string
+	unknown    bool
 }
 
 func inboundConfigFromEnv() (inboundConfig, bool) {
@@ -85,21 +86,22 @@ func inboundConfigFromEnv() (inboundConfig, bool) {
 	announcesPerSecond := envInt("BITMAGNET_TRACKER_ANNOUNCE_PPS", 30)
 
 	return inboundConfig{
-		maxHashes: envInt("BITMAGNET_INBOUND_MAX_HASHES", 2*announcesPerSecond*holdSeconds),
-		hold:      time.Duration(holdSeconds) * time.Second,
-		maxConns:  envInt("BITMAGNET_INBOUND_MAX_CONNS", 3000),
-		maxPerIP:  envInt("BITMAGNET_INBOUND_MAX_CONNS_PER_IP", 8),
-		lateMax:   envInt("BITMAGNET_INBOUND_LATE_HASHES", 50_000),
-		lateTTL:   time.Duration(envInt("BITMAGNET_INBOUND_LATE_SECONDS", 900)) * time.Second,
-		extraMin:  uint32(envInt("BITMAGNET_INBOUND_EXTRA_MIN_SEEDERS", 2)),
-		extraMax:  envInt("BITMAGNET_INBOUND_EXTRA_TRACKERS", 3),
-		stateFile: stateFile,
-		dht:       os.Getenv("BITMAGNET_INBOUND_DHT") == "on",
-		dhtPPS:    envInt("BITMAGNET_INBOUND_DHT_PPS", 150),
-		dhtMax:    envInt("BITMAGNET_INBOUND_DHT_HASHES", 300_000),
-		dhtTTL:    time.Duration(envInt("BITMAGNET_INBOUND_DHT_SECONDS", 2700)) * time.Second,
-		dhtSeeds:  dhtSeedsFromEnv(),
-		unknown:   os.Getenv("BITMAGNET_INBOUND_UNKNOWN") == "on",
+		maxHashes:  envInt("BITMAGNET_INBOUND_MAX_HASHES", 2*announcesPerSecond*holdSeconds),
+		hold:       time.Duration(holdSeconds) * time.Second,
+		maxConns:   envInt("BITMAGNET_INBOUND_MAX_CONNS", 3000),
+		maxPerIP:   envInt("BITMAGNET_INBOUND_MAX_CONNS_PER_IP", 8),
+		lateMax:    envInt("BITMAGNET_INBOUND_LATE_HASHES", 50_000),
+		lateTTL:    time.Duration(envInt("BITMAGNET_INBOUND_LATE_SECONDS", 900)) * time.Second,
+		extraMin:   uint32(envInt("BITMAGNET_INBOUND_EXTRA_MIN_SEEDERS", 2)),
+		extraMax:   envInt("BITMAGNET_INBOUND_EXTRA_TRACKERS", 3),
+		stateFile:  stateFile,
+		dht:        os.Getenv("BITMAGNET_INBOUND_DHT") == "on",
+		dhtPPS:     envInt("BITMAGNET_INBOUND_DHT_PPS", 150),
+		dhtWorkers: envInt("BITMAGNET_INBOUND_DHT_WORKERS", inboundDHTWorkers),
+		dhtMax:     envInt("BITMAGNET_INBOUND_DHT_HASHES", 300_000),
+		dhtTTL:     time.Duration(envInt("BITMAGNET_INBOUND_DHT_SECONDS", 2700)) * time.Second,
+		dhtSeeds:   dhtSeedsFromEnv(),
+		unknown:    os.Getenv("BITMAGNET_INBOUND_UNKNOWN") == "on",
 	}, true
 }
 
@@ -304,7 +306,7 @@ func (p *inboundPeers) run(ctx context.Context) {
 	}
 
 	if p.dhtQueue != nil {
-		for range inboundDHTWorkers {
+		for range max(p.config.dhtWorkers, 1) {
 			go p.runDHT(ctx)
 		}
 	}

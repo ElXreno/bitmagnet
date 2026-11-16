@@ -18,7 +18,7 @@ import (
 
 const (
 	inboundDHTWorkers = 16
-	inboundDHTQueue   = 256
+	inboundDHTQueue   = 16
 	inboundDHTNodes   = 8
 	inboundDHTLookups = 64
 	inboundDHTFile    = "inbound_dht_hashes.bin"
@@ -34,7 +34,7 @@ type inboundDHTTarget struct {
 }
 
 func (p *inboundPeers) enableDHT(v4 net.Listener, v6 net.Listener) {
-	p.dhtQueue = make(chan protocol.ID, inboundDHTQueue)
+	p.dhtQueue = make(chan protocol.ID, inboundDHTQueue*max(p.config.dhtWorkers, inboundDHTWorkers))
 	p.dhtTargets = []inboundDHTTarget{{family: p.c.v4, port: listenerPort(v4)}}
 
 	if v6 != nil && p.c.v6 != nil {
